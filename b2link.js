@@ -1,0 +1,105 @@
+/* b2link.js — Ink & Iron <-> Grok Bot "B2" world-AI bridge. Drop-in, no secrets inside.
+ * All credentials (webhook sender key, GitHub fine-grained token) are pasted by the user
+ * into the settings panel and stored ONLY in this browser's localStorage ("b2link.cfg").
+ * Protocol: see PROTOCOL.md.  Works in browser (window.B2Link) and Node (module.exports). */
+(function(root){
+'use strict';
+const V = 1, CFG_KEY = 'b2link.cfg';
+const DEF = { enabled:false, wake:'webhook', hookUrl:'', hookKey:'', repo:'', token:'', prToken:'', pr:1,
+              timeoutMs:150000, pollMs:10000, firstPollMs:45000 };
+let store = (typeof localStorage!=='undefined') ? localStorage : null;
+let fetchFn = (typeof fetch!=='undefined') ? (...a)=>fetch(...a) : null;
+let now = () => Date.now(), sleep = ms => new Promise(r=>setTimeout(r,ms));
+
+function cfg(){ try{ return Object.assign({}, DEF, JSON.parse((store&&store.getItem(CFG_KEY))||'{}')); }catch(e){ return Object.assign({},DEF); } }
+function saveCfg(patch){ const c=Object.assign(cfg(), patch||{}); store&&store.setItem(CFG_KEY, JSON.stringify(c)); return c; }
+function forget(){ store&&store.removeItem(CFG_KEY); }   // "Forget credentials" button
+function ready(c=cfg()){ return !!(c.enabled && c.repo && c.token && (c.wake==='ghcomment' ? c.pr : (c.hookUrl && c.hookKey))); }
+
+/* Random, anonymous game id (no user info). Persisted per browser. */
+function gameId(){ let g=store&&store.getItem('b2link.gid'); if(!g){ g=Math.random().toString(36).slice(2,10); store&&store.setItem('b2link.gid',g); } return g; }
+function newGame(){ store&&store.removeItem('b2link.gid'); }
+
+/* ---- compact state digest (target < 1.5 KB) ----
+ * W = game internals: {S, ADJ, REG, NAT}.  act = {kind,target,text} or null for a world tick. */
+function digest(W, act){
+  const {S, ADJ, REG, NAT} = W, P=S.player, T=act&&act.target;
+  const alive = c => S.nat[c] && S.nat[c].alive;
+  const rk=(a,b)=>a<b?a+'|'+b:b+'|'+a, rel=(a,b)=>S.rel[rk(a,b)]??0;
+  const owned = c => Object.keys(S.owner).filter(r=>S.owner[r]===c);
+  const nbrs = c => { const s=new Set(); owned(c).forEach(r=>ADJ[r].forEach(x=>{ const o=S.owner[x]; if(o!==c&&alive(o)) s.add(o); })); return s; };
+  const near = new Set([P]); if(T&&T!==P) near.add(T);
+  ['GER','UK','FRA','SOV','ITA'].forEach(x=>alive(x)&&near.add(x));          // great powers always visible
+  nbrs(P).forEach(x=>near.add(x)); if(T) nbrs(T).forEach(x=>near.add(x));
+  const list=[...near].slice(0,16);
+  const st={}; list.forEach(c=>{ const n=S.nat[c]; st[c]=[n.army,n.industry,n.stability]; });
+  const rl={}; list.filter(c=>c!==P).forEach(c=>rl[c]=rel(P,c)); if(T&&T!==P) list.filter(c=>c!==P&&c!==T).slice(0,8).forEach(c=>rl[T+'-'+c]=rel(T,c));
+  const front = (T&&T!==P) ? owned(T).filter(r=>[...ADJ[r]].some(x=>S.owner[x]===P)).slice(0,8) : [];
+  const occ={}; Object.keys(S.owner).forEach(r=>{ if(REG[r].home!==S.owner[r]) occ[r]=S.owner[r]; });
+  const tgtReg = T ? owned(T).slice(0,12) : [];
+  return { p:P, d:`${S.y}-${String(S.m+1).padStart(2,'0')}`,
+    st, rl, war:S.wars.map(w=>w.a+'-'+w.b), tr:S.treaties.map(t=>t.type[0]+':'+t.a+'-'+t.b),
+    front, treg:tgtReg, occ };
+}
+
+function buildRequest(W, act, worldOnly){
+  const S=W.S, gid=gameId();
+  const req = { v:V, id:`${gid}.${S.turn}.${worldOnly?'w':'p'}`, n:S.player, d:`${S.y}-${String(S.m+1).padStart(2,'0')}`,
+    mv: worldOnly ? {k:'tick'} : {k:act.kind, t:act.target, ...(act.text?{x:String(act.text).slice(0,280)}:{})},
+    s: digest(W, worldOnly?null:act) };
+  delete req.s.p; delete req.s.d;               // already in n/d
+  return req;
+}
+
+/* ---- transport ---- */
+async function wake(c, req){
+  const body = JSON.stringify(req);
+  if(c.wake==='ghcomment'){   // wake via a GitHub pr-comment listener: the comment body IS the request (private repo)
+    const r = await fetchFn(`https://api.github.com/repos/${c.repo}/issues/${c.pr}/comments`, {method:'POST',
+      headers:{'Authorization':'Bearer '+(c.prToken||c.token),'Accept':'application/vnd.github+json','Content-Type':'application/json'},
+      body: JSON.stringify({body:'b2turn '+body})});
+    if(!r.ok) throw new Error('wake HTTP '+r.status); return;
+  }
+  const r = await fetchFn(c.hookUrl, {method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+c.hookKey}, body});
+  if(!r.ok) throw new Error('wake HTTP '+r.status);
+}
+async function readResult(c, id){
+  const r = await fetchFn(`https://api.github.com/repos/${c.repo}/contents/r/${encodeURIComponent(id)}.json`, {cache:'no-store',
+    headers:{'Authorization':'Bearer '+c.token,'Accept':'application/vnd.github.raw+json'}});
+  if(r.status===404) return null;
+  if(!r.ok) throw new Error('read HTTP '+r.status);
+  return JSON.parse(await r.text());
+}
+
+/* Shallow schema gate (the game's own validate() does the strict pass). */
+const KEYS=['narrative','border_changes','relation_changes','reactions','events','wars','treaties','stat_changes'];
+function shapeOk(o){ return o && typeof o.narrative==='string' && KEYS.slice(1).every(k=>o[k]===undefined||Array.isArray(o[k])); }
+function normalize(o){ const out={narrative:o.narrative}; KEYS.slice(1).forEach(k=>out[k]=Array.isArray(o[k])?o[k]:[]); return out; }
+
+/* Main entry. Returns a result object (same schema as the LLM path) or null -> caller uses rules engine.
+ * opts: {onStatus(text), validate(obj)} */
+async function resolve(W, act, worldOnly, opts={}){
+  const c=cfg(); if(!ready(c)) return null;
+  const say = t => { try{ opts.onStatus&&opts.onStatus(t); }catch(e){} };
+  const req = buildRequest(W, act, worldOnly), t0=now();
+  try{
+    const early = await readResult(c, req.id).catch(()=>null);   // idempotent: already resolved (e.g. reload)
+    if(early && early.id===req.id && shapeOk(early.r)) return finish(early.r);
+    say('The world is thinking… (usually 1–2 min)'); await wake(c, req);
+  }catch(e){ say('B2 unreachable ('+e.message+') — rules engine used'); return null; }
+  await sleep(Math.min(c.firstPollMs, c.timeoutMs));
+  while(now()-t0 < c.timeoutMs){
+    try{ const j = await readResult(c, req.id);
+      if(j && j.id===req.id){ if(j.err||!shapeOk(j.r)){ say('B2 declined turn — rules engine used'); return null; } return finish(j.r); } }
+    catch(e){ if(/40[13]/.test(e.message)){ say('GitHub token rejected — rules engine used'); return null; } }
+    say(`The world is thinking… ${Math.round((now()-t0)/1000)}s`);
+    await sleep(c.pollMs);
+  }
+  say('B2 timed out — rules engine used'); return null;   // a late result for this id is simply ignored
+  function finish(r){ r=normalize(r); if(opts.validate){ try{ r=opts.validate(r); }catch(e){ say('B2 reply invalid — rules engine used'); return null; } } say('online · B2'); return r; }
+}
+
+const api = { V, cfg, saveCfg, forget, ready, gameId, newGame, digest, buildRequest, resolve,
+  _inject(o){ if(o.store) store=o.store; if(o.fetch) fetchFn=o.fetch; if(o.now) now=o.now; if(o.sleep) sleep=o.sleep; } };
+if(typeof module!=='undefined' && module.exports) module.exports=api; else root.B2Link=api;
+})(typeof window!=='undefined'?window:globalThis);
