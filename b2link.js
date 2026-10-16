@@ -12,10 +12,28 @@ let store = (typeof localStorage!=='undefined') ? localStorage : null;
 let fetchFn = (typeof fetch!=='undefined') ? (...a)=>fetch(...a) : null;
 let now = () => Date.now(), sleep = ms => new Promise(r=>setTimeout(r,ms));
 
-function cfg(){ try{ return Object.assign({}, DEF, JSON.parse((store&&store.getItem(CFG_KEY))||'{}')); }catch(e){ return Object.assign({},DEF); } }
-function saveCfg(patch){ const c=Object.assign(cfg(), patch||{}); store&&store.setItem(CFG_KEY, JSON.stringify(c)); return c; }
+const SV = 2;   // settings version: v2 = PR-comment wake default (webhook is CORS-blocked in browsers)
+/* Strip whitespace, zero-width chars, smart quotes and any non-ASCII (they break fetch headers). Returns [clean, removedCount]. */
+function clean(v){ const s=String(v==null?'':v); const c=s.replace(/[^\x21-\x7E]/g,'').replace(/["'`]/g,''); return [c, s.length-c.length]; }
+const SAN = ['token','prToken','hookKey','hookUrl','repo'];
+function sanitize(c){ const notes=[]; SAN.forEach(k=>{ if(typeof c[k]!=='string') return; const [v,n]=clean(c[k]); if(n){ c[k]=v; if(c[k]||n) notes.push(`Removed ${n} hidden/invalid character${n>1?'s':''} from ${k==='token'?'token':k}`); } }); return notes; }
+function tokenIssue(t){ if(!t) return ''; if(/^github_pat_[A-Za-z0-9_]{20,}$/.test(t)||/^gh[pousr]_[A-Za-z0-9]{20,}$/.test(t)) return ''; return "Token doesn't look like a GitHub token (should start with github_pat_)"; }
+function repoIssue(r){ return !r||/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/.test(r) ? '' : 'Turns repo should look like owner/name'; }
+function mask(t){ return t ? `${t.slice(0,11)}… (${t.length} chars)` : '—'; }
+let lastNotes=[];
+function cfg(){ let raw={}; try{ raw=JSON.parse((store&&store.getItem(CFG_KEY))||'{}')||{}; }catch(e){ raw={}; }
+  const c=Object.assign({}, DEF, raw), notes=sanitize(c); let dirty=notes.length>0;
+  if(Object.keys(raw).length && (raw.sv||0)<SV){ if(c.wake==='webhook'){ notes.push('Switched wake to PR comment (the webhook is blocked by browsers)'); } c.wake='ghcomment'; c.sv=SV; dirty=true; }
+  if(!c.sv) c.sv=SV;
+  if(dirty&&store){ store.setItem(CFG_KEY, JSON.stringify(c)); lastNotes=lastNotes.concat(notes); }
+  return c; }
+function saveCfg(patch){ const c=Object.assign(cfg(), patch||{}, {sv:SV}); lastNotes=lastNotes.concat(sanitize(c)); store&&store.setItem(CFG_KEY, JSON.stringify(c)); return c; }
+function takeNotes(){ const n=lastNotes; lastNotes=[]; return [...new Set(n)]; }
+function check(c=cfg()){ return [tokenIssue(c.token), c.prToken?tokenIssue(c.prToken):'', repoIssue(c.repo)].filter(Boolean); }
+/* fetch wrapper: header errors (non-ISO-8859-1) become a friendly message, never echoing the token */
+async function gfetch(u,o){ try{ return await fetchFn(u,o); }catch(e){ if(/ISO-8859-1|header/i.test(e.message)) throw new Error('token contains an invalid character — re-paste it'); throw e; } }
 function forget(){ store&&store.removeItem(CFG_KEY); }   // "Forget credentials" button
-function ready(c=cfg()){ return !!(c.enabled && c.repo && c.token && (c.wake==='ghcomment' ? c.pr : (c.hookUrl && c.hookKey))); }
+function ready(c=cfg()){ return !!(c.enabled && !tokenIssue(c.token) && !repoIssue(c.repo) && c.repo && c.token && (c.wake==='ghcomment' ? c.pr : (c.hookUrl && c.hookKey))); }
 
 /* Random, anonymous game id (no user info). Persisted per browser. */
 function gameId(){ let g=store&&store.getItem('b2link.gid'); if(!g){ g=Math.random().toString(36).slice(2,10); store&&store.setItem('b2link.gid',g); } return g; }
@@ -56,7 +74,7 @@ function buildRequest(W, act, worldOnly){
 async function wake(c, req){
   const body = JSON.stringify(req);
   if(c.wake==='ghcomment'){   // wake via a GitHub pr-comment listener: the comment body IS the request (private repo)
-    const r = await fetchFn(`https://api.github.com/repos/${c.repo}/issues/${c.pr}/comments`, {method:'POST',
+    const r = await gfetch(`https://api.github.com/repos/${c.repo}/issues/${c.pr}/comments`, {method:'POST',
       headers:{'Authorization':'Bearer '+(c.prToken||c.token),'Accept':'application/vnd.github+json','Content-Type':'application/json'},
       body: JSON.stringify({body:'b2turn '+body})});
     if(r.status!==201) throw new Error('comment API HTTP '+r.status); return r.status;
@@ -66,7 +84,7 @@ async function wake(c, req){
   if(!r.ok) throw new Error('wake HTTP '+r.status); return r.status;
 }
 async function readResult(c, id){
-  const r = await fetchFn(`https://api.github.com/repos/${c.repo}/contents/r/${encodeURIComponent(id)}.json`, {cache:'no-store',
+  const r = await gfetch(`https://api.github.com/repos/${c.repo}/contents/r/${encodeURIComponent(id)}.json`, {cache:'no-store',
     headers:{'Authorization':'Bearer '+c.token,'Accept':'application/vnd.github.raw+json'}});
   if(r.status===404) return null;
   if(!r.ok) throw new Error('read HTTP '+r.status);
@@ -115,7 +133,7 @@ async function probe(opts={}){
   return {ok:false, stage:'reply', msg:`wake accepted (HTTP ${st}) but no reply within ${Math.round(c.timeoutMs/1000)}s — is B2's routine on?`};
 }
 
-const api = { probe, lastError:null, V, cfg, saveCfg, forget, ready, gameId, newGame, digest, buildRequest, resolve,
+const api = { probe, lastError:null, clean, sanitize, tokenIssue, repoIssue, mask, takeNotes, check, gfetch, SV, V, cfg, saveCfg, forget, ready, gameId, newGame, digest, buildRequest, resolve,
   _inject(o){ if(o.store) store=o.store; if(o.fetch) fetchFn=o.fetch; if(o.now) now=o.now; if(o.sleep) sleep=o.sleep; } };
 if(typeof module!=='undefined' && module.exports) module.exports=api; else root.B2Link=api;
 })(typeof window!=='undefined'?window:globalThis);

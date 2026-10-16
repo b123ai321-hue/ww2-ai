@@ -723,15 +723,16 @@ $('#wl-load').onclick=async()=>{ const id=$('#wl-model').value; if(!confirm(`Dow
 
 function fillB2(){ if(!window.B2Link) return; const c=B2Link.cfg(); $('#b2-enabled').checked=c.enabled; $('#b2-repo').value=c.repo||''; $('#b2-wh').checked=c.wake==='webhook'; $('#b2-prnum').value=c.pr||1;
   ['b2-hook','b2-key','b2-token'].forEach(id=>{ $('#'+id).value=''; });
-  $('#b2-state').textContent=`Stored in this browser only: token ${c.token?'✔':'—'} · wake: ${c.wake==='webhook'?'webhook':'PR #'+(c.pr||1)+' comment'}${c.wake==='webhook'?` · webhook ${c.hookUrl?'✔':'—'} · key ${c.hookKey?'✔':'—'}`:''} · ${B2Link.ready()?'READY (B2 is the AI)':'not active'}`; }
+  const msgs=B2Link.takeNotes().concat(B2Link.check(c)); $('#b2-out').textContent=msgs.length?msgs.join('. ')+'.':'';
+  $('#b2-state').textContent=`Stored in this browser only: token ${c.token?B2Link.mask(c.token):'—'} · wake: ${c.wake==='webhook'?'webhook':'PR #'+(c.pr||1)+' comment'}${c.wake==='webhook'?` · webhook ${c.hookUrl?'✔':'—'} · key ${c.hookKey?'✔':'—'}`:''} · ${B2Link.ready()?'READY (B2 is the AI)':'not active'}`; }
 function saveB2(){ if(!window.B2Link) return; const c=B2Link.cfg(), patch={enabled:$('#b2-enabled').checked, repo:$('#b2-repo').value.trim()||c.repo, wake:$('#b2-wh').checked?'webhook':'ghcomment', pr:+$('#b2-prnum').value||1};
   [['b2-hook','hookUrl'],['b2-key','hookKey'],['b2-token','token']].forEach(([id,k])=>{ const v=$('#'+id).value.trim(); if(v) patch[k]=v; }); B2Link.saveCfg(patch); fillB2(); }
 $('#b2-save').onclick=()=>{ saveB2(); };
 $('#b2-forget').onclick=()=>{ if(window.B2Link){ B2Link.forget(); fillB2(); $('#b2-out').textContent='B2 credentials removed from this browser.'; } };
-$('#b2-test').onclick=async()=>{ saveB2(); const c=B2Link.cfg(); const out=$('#b2-out'); if(!c.repo||!c.token){ out.textContent='Need the turns repo and the token.'; return; } out.textContent='Checking GitHub access…';
-  try{ const r=await fetch(`https://api.github.com/repos/${c.repo}`,{headers:{'Authorization':'Bearer '+c.token,'Accept':'application/vnd.github+json'}});
-    if(!r.ok){ out.textContent=`GitHub said HTTP ${r.status} — check the token/repo.`; return; }
-    const pv=(await r.json()).private; out.textContent=`Token OK: ${c.repo} is reachable (${pv?'private':'PUBLIC — should be private!'}). Sending a probe to B2…`;
+$('#b2-test').onclick=async()=>{ saveB2(); const c=B2Link.cfg(); const out=$('#b2-out'); if(!c.repo||!c.token){ out.textContent='Need the turns repo and the token.'; return; } const iss=B2Link.check(c); if(iss.length){ out.textContent=iss.join('. ')+'.'; return; } const pre=out.textContent?out.textContent+'\n':''; out.textContent=pre+'Checking GitHub access…';
+  try{ const r=await B2Link.gfetch(`https://api.github.com/repos/${c.repo}`,{headers:{'Authorization':'Bearer '+c.token,'Accept':'application/vnd.github+json'}});
+    if(!r.ok){ out.textContent=pre+`GitHub said HTTP ${r.status} — check the token/repo.`; return; }
+    const pv=(await r.json()).private; out.textContent=pre+`Token OK: ${c.repo} is reachable (${pv?'private':'PUBLIC — should be private!'}). Sending a probe to B2…`;
     if(c.wake==='webhook'&&(!c.hookUrl||!c.hookKey)){ out.textContent+=' Webhook URL/key missing.'; return; }
     const head=out.textContent; const res=await B2Link.probe({onStatus:t=>out.textContent=head+'\n'+t});
     out.textContent=head+'\n'+(res.ok?`B2 answered: "${String(res.msg).slice(0,160)}"`:res.stage==='wake'?`Could not wake B2: ${res.msg}.`+(/403|404/.test(res.msg)?' The token needs "Pull requests: write" on this repo.':''):`B2 problem: ${res.msg}`); }
