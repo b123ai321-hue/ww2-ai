@@ -142,3 +142,19 @@ body.drawer #mapwrap .cmdbar,body.drawer #mapwrap .legend{right:360px}
 #pp-conf .row button{flex:1;min-height:44px}#cf-go.go{background:#1d4a2a}
 .odds{font-weight:bold}
 @media (max-width:820px),(max-height:500px){ #popup.sheet .pp-tabs button{min-height:44px;font-size:14px} #popup.sheet .pp-acts .act{min-height:56px} #popup.sheet .pp-acts .act b{font-size:15px} #popup.sheet{max-height:72dvh} }
+
+/* v5 tiled map: canvas is exactly the viewport */
+#map{border:0;box-shadow:none;width:100%;height:100%;transform:none!important;image-rendering:pixelated}
+/* v5 armies & battles */
+.pp-tabs{display:flex;flex-wrap:wrap;gap:3px}.pp-tabs button{flex:1 1 18%;min-width:0;font-size:12px;padding:6px 2px}
+.dv{display:flex;gap:8px;align-items:flex-start;border-bottom:1px dashed #9c8a6a;padding:6px 0}.dv .sw{flex:0 0 14px;height:14px;margin-top:3px}.dv>div{flex:1}
+.orgb{height:5px;background:#cbbd9c;margin:3px 0}.orgb i{display:block;height:100%;background:#3d6b2f}
+.dv .row{display:flex;gap:6px;margin-top:5px}.dv .row button{flex:1;min-height:40px}
+#order{position:fixed;left:8px;right:8px;top:calc(var(--hh,50px) + 6px);z-index:30;display:none;align-items:center;gap:8px;background:#efe6cf;border:2px solid #0d0a07;padding:8px 10px;font:600 13px Georgia,serif;box-shadow:3px 3px 0 #000}
+#order span{flex:1}#order button{min-height:40px}#order .g{color:#2f7a3b}
+.card.bt{max-width:540px;width:calc(100vw - 20px);max-height:88vh;overflow:auto}.bt-sides{display:flex;justify-content:space-between;gap:8px;align-items:center}.bt-sides span{flex:1;font-weight:700}.bt-sides small{display:block;font-weight:400;font-size:11px}
+.bt-sides .sw{display:inline-block;width:12px;height:12px;margin-right:4px}.bt-win{margin:8px 0;padding:6px;text-align:center;font:900 16px Impact,sans-serif;letter-spacing:.5px;border:2px solid #0d0a07}.bt-win.a{background:#e9cdb8}.bt-win.d{background:#cfd9c2}
+.bt-ph{width:100%;border-collapse:collapse;font-size:12px}.bt-ph td,.bt-ph th{border-bottom:1px solid #b9a984;padding:3px 2px;text-align:left}.bt-mods{font-size:12px;padding-left:18px}.bt-cas{margin:6px 0;font-size:13px}
+.pp-tabs{grid-template-columns:repeat(5,1fr)!important}@media (max-width:820px),(max-height:500px){#popup.sheet .pp-tabs button{font-size:12px}}
+.pp-tabs{grid-template-columns:repeat(6,1fr)!important}@media (max-width:820px),(max-height:500px){.pp-tabs{grid-template-columns:repeat(3,1fr)!important}}
+#order span{color:#1a140e}
