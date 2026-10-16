@@ -2,50 +2,28 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0d0a07"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Ink &amp; Iron">
 <link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="icon-180.png"><link rel="icon" href="icon.svg">
-<link rel="stylesheet" href="style.css?v=7"></head><body>
+<link rel="stylesheet" href="style.css?v=8"></head><body>
 <header><div class="logo">INK <span>&amp;</span> IRON</div>
 <div id="date">—</div><div class="pl"><span id="pflag" class="sw"></span><b id="pname">—</b><small id="pstats"></small></div>
 <div id="tension" title="World tension"><small>TENSION</small><span><i></i></span><b>0</b></div>
 <div class="btns"><button id="btn-pass" title="Advance one month">End Month ▸</button>
 <select id="slot" aria-label="Save slot"><option>1</option><option>2</option><option>3</option></select><button id="btn-save">Save</button><button id="btn-load">Load</button>
 <button id="btn-export">Export</button><button id="btn-import">Import</button><input type="file" id="importfile" accept=".json" hidden>
-<button id="btn-settings">AI Settings</button><button id="btn-new">New Game</button></div></header>
+<button id="btn-new">New Game</button></div></header>
 <div id="ticker"><span>—</span></div>
 <main><div id="mapwrap"><canvas id="map"></canvas><div class="zoom"><button id="zin" aria-label="Zoom in">+</button><button id="zout" aria-label="Zoom out">−</button><button id="zfit" aria-label="Whole world">⤢</button><button id="zme" aria-label="My country">◉</button></div>
-<form id="cmd-form" class="cmdbar" autocomplete="off"><input id="cmd" type="text" enterkeyhint="send" placeholder="Type an order… e.g. Invade Poland, Ally with Italy, Build factories"><button type="submit">▸</button></form>
-<div class="legend"><span id="ai-status">AI: …</span></div></div>
+
+<div class="legend"><span>Tap a country to act · rules engine</span></div></div>
 <aside><div class="tabs"><button class="tab on" data-p="brief">Briefing</button><button class="tab" data-p="log">War Diary</button><button class="tab" data-p="rels">Relations</button></div>
 <div id="brief" class="pane"></div><div id="log" class="pane" style="display:none"></div><div id="rels" class="pane" style="display:none"></div></aside></main>
 <div id="tip"></div>
 <div id="popup"><div class="pp-h"><span id="pp-flag" class="sw"></span><b id="pp-title"></b><button id="pp-close" aria-label="Close">✕</button></div>
-<div id="pp-info"></div><div id="pp-acts" class="pp-acts"></div><div id="pp-sub" class="pp-sub"></div>
-<form id="pp-form" autocomplete="off"><input id="pp-text" type="text" enterkeyhint="send" placeholder="Type what you want to do… e.g. Demand Danzig back"><button id="pp-go" type="submit">Do it ▸</button></form></div>
+<div id="pp-info"></div><div id="pp-tabs" class="pp-tabs"></div><div id="pp-acts" class="pp-acts"></div><div id="pp-conf"></div>
+</div>
 <div id="busy"><div class="ink"></div><div id="busy-t">The ink is drying…</div></div>
 <div id="report" class="modal"><div class="card rp"><h2 id="rp-title"></h2><div id="rp-body"></div><button id="rp-ok">Continue ▸</button></div></div>
 <div id="decision" class="modal"><div class="card dc"><div class="stamp">DECISION</div><h2 id="dc-title"></h2><p id="dc-text"></p><div id="dc-opts"></div></div></div>
 <div id="start" class="modal"><div class="card"><h1>INK &amp; IRON</h1><p class="tag">December 1935. The whole world on one map. Every nation, every empire, one pen. Rewrite the war before it starts.</p>
 <h3>Great Powers</h3><div id="start-majors" class="grid"></div><h3>Other Nations</h3><div id="start-minors" class="grid"></div>
-<button id="start-continue">Continue autosave</button> <button id="start-settings">AI Settings</button></div></div>
-<div id="settings" class="modal"><div class="card"><h2>AI Game Master</h2>
-<p>The game always works with the built-in rules engine and order parser — free, offline, instant. You can optionally add an AI to interpret typed orders and speak for your ministers.</p>
-<h3>B2 world AI</h3>
-<p><small>Optional. Each move is posted as a comment in your private turns repo; B2 wakes, resolves it and writes the reply there. The token is kept <b>only in this browser</b> (never in the game files). Priority: B2 → on-device AI → rules engine.</small></p>
-<label><input type="checkbox" id="b2-enabled"> Use B2 as the world AI</label>
-<label>Turns repo <input id="b2-repo" type="text" autocomplete="off" placeholder="owner/repo (private)"></label>
-<label>Token (fine-grained: Contents read + Pull requests write, this repo only) <input id="b2-token" type="password" autocomplete="off" placeholder="paste (hidden)"></label>
-<details><summary>Advanced (optional)</summary><label>Inbox PR number <input id="b2-prnum" type="number" min="1"></label><label><input type="checkbox" id="b2-wh"> Wake via webhook instead (browsers block it today)</label><label>Webhook URL <input id="b2-hook" type="password" autocomplete="off" placeholder="optional (hidden)"></label><label>Sender key <input id="b2-key" type="password" autocomplete="off" placeholder="optional (hidden)"></label></details>
-<div class="row"><button id="b2-save">Save B2</button><button id="b2-test">Test B2</button><button id="b2-forget" class="red">Forget B2 credentials</button></div><pre id="b2-state"></pre><pre id="b2-out"></pre>
-<h3>On-device AI (phone / browser)</h3>
-<p><small>Runs entirely in your browser with WebGPU. No account, no key, nothing sent to a server. One-time download, then cached. <span id="wl-gpu"></span></small></p>
-<label>Model <select id="wl-model"><option value="SmolLM2-360M-Instruct-q4f16_1-MLC" data-size="about 200–300 MB">Small & fast (SmolLM2 360M, ~200–300 MB)</option><option value="Qwen2.5-0.5B-Instruct-q4f16_1-MLC" data-size="about 300–400 MB, needs ~1 GB GPU memory">Smarter (Qwen2.5 0.5B, ~300–400 MB)</option></select></label>
-<div class="row"><button id="wl-load">Load on-device AI</button></div><pre id="wl-out"></pre>
-<h3>Local AI on a PC</h3>
-<p id="hosted-note" class="note" style="display:none">Web version: the local-model connection only works in the PC build (launch.sh + Ollama/LM Studio on the same computer).</p>
-<div class="llm"><label><input type="checkbox" id="s-enabled"> Use local model server</label>
-<label>Server type <select id="s-kind"><option value="auto">auto</option><option value="ollama">Ollama</option><option value="openai">OpenAI-compatible (LM Studio, llama.cpp)</option></select></label>
-<label>Endpoint <input id="s-base" placeholder="http://127.0.0.1:11434"></label>
-<label>Model <input id="s-model" list="s-modellist" placeholder="e.g. qwen2.5:3b"><datalist id="s-modellist"></datalist></label>
-<label>Timeout (s) <input id="s-timeout" type="number" min="10" max="600"></label><label>Temperature <input id="s-temp" type="number" step="0.1" min="0" max="1.5"></label>
-<div class="row"><button id="s-detect">Autodetect</button><button id="s-test">Test model</button></div></div>
-<div class="row"><button id="s-close">Save &amp; close</button></div><pre id="s-detect-out"></pre></div></div>
-<script src="data.js?v=7"></script><script src="b2link.js?v=7"></script><script src="game.js?v=7"></script></body></html>
+<button id="start-continue">Continue autosave</button></div></div>
+<script src="data.js?v=8"></script><script src="game.js?v=8"></script></body></html>

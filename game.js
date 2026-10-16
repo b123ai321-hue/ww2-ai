@@ -1,5 +1,5 @@
-/* INK & IRON v3 — world-scale alternate-history WWII. Rules engine + intent parser by default;
-   optional local LLM (PC, via server.py proxy) or on-device WebLLM (phone, opt-in). */
+/* INK & IRON v4 — world-scale alternate-history WWII. Rules-only: diplomacy, intrigue, economy and war
+   resolved by a deterministic-ish rules engine. No AI, no network calls. */
 (function(){
 'use strict';
 const D = window.WW2DATA;
@@ -8,9 +8,10 @@ const NAT = Object.keys(D.N);
 const REG = {}; D.R.forEach(r => REG[r[0]] = {id:r[0], name:r[1], home:r[2], lon:r[3], lat:r[4], t:r[5][0], river:r[5].includes('r')});
 const RIDS = Object.keys(REG);
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-const SAVE_KEY='ww2ai.v3.autosave', CFG_KEY='ww2ai.settings';
+const SAVE_KEY='ww2ai.v4.autosave';
+['b2link.cfg','b2link.gid','b2link.notes','ww2ai.settings'].forEach(k=>{ try{ localStorage.removeItem(k); }catch(e){} }); // AI removed: wipe any stored AI/B2 credentials
 const TERR = {p:['plains',1], f:['forest',1.3], m:['mountains',1.8], s:['marsh',1.4], d:['desert',1.15], j:['jungle',1.5], a:['arctic',1.5]};
-let S=null, CFG=loadCfg(), busy=false;
+let S=null, busy=false;
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 function rnd(){ S.seed=(S.seed*1664525+1013904223)>>>0; return S.seed/4294967296; }
 const pick=a=>a[Math.floor(rnd()*a.length)];
@@ -18,7 +19,7 @@ const nm=c=>(D.N[c]||[c])[0];
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 /* ================= MAP GRID ================= */
-const LON0=-180, LON1=180, LAT0=-56, LAT1=84, KX=0.8, STEP=0.25, CS=4;
+const LON0=-180, LON1=180, LAT0=-56, LAT1=84, KX=0.8, STEP=0.2, CS=3;
 const COLS=Math.ceil((LON1-LON0)*KX/STEP), ROWS=Math.ceil((LAT1-LAT0)/STEP);
 const POLYS=[]; for(const k in D.LAND){ const p=D.LAND[k]; let x0=1e9,x1=-1e9,y0=1e9,y1=-1e9; p.forEach(([x,y])=>{x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);}); POLYS.push({k,p,x0,x1,y0,y1}); }
 const SEAS=Object.values(D.SEA);
@@ -35,15 +36,17 @@ const toPx=(lon,lat)=>[(lon-LON0)*KX/STEP*CS, (LAT1-lat)/STEP*CS];
 const ADJ={}, LANDADJ={}; RIDS.forEach(id=>{ADJ[id]=new Set();LANDADJ[id]=new Set();});
 for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++){ const a=GRID[r*COLS+c]; if(a<0) continue; for(const [dr,dc] of [[0,1],[1,0]]){ if(r+dr>=ROWS||c+dc>=COLS) continue; const b=GRID[(r+dr)*COLS+c+dc]; if(b>=0&&b!==a){ ADJ[RIDS[a]].add(RIDS[b]); ADJ[RIDS[b]].add(RIDS[a]); LANDADJ[RIDS[a]].add(RIDS[b]); LANDADJ[RIDS[b]].add(RIDS[a]); } } }
 D.SEALINKS.forEach(([a,b])=>{ ADJ[a].add(b); ADJ[b].add(a); });
+const COAST=new Set(); for(let r=1;r<ROWS-1;r++) for(let c=1;c<COLS-1;c++){ const a=GRID[r*COLS+c]; if(a>=0&&(GRID[r*COLS+c+1]<0||GRID[r*COLS+c-1]<0||GRID[(r+1)*COLS+c]<0||GRID[(r-1)*COLS+c]<0)) COAST.add(RIDS[a]); }
 
 /* ================= STATE ================= */
 const rk=(a,b)=>a<b?a+'|'+b:b+'|'+a;
-const IDEO=c=>D.N[c][3];
+const IDEO=c=>(S&&S.ideo&&S.ideo[c])||D.N[c][3];
 function ideoAff(a,b){ const ia=IDEO(a), ib=IDEO(b); if(ia===ib) return 20; if((ia==='communist')!==(ib==='communist')) return -25; if((ia==='fascist'&&ib==='democratic')||(ib==='fascist'&&ia==='democratic')) return -15; return 0; }
 function newGame(player){
-  S={v:3, seed:(Date.now()>>>0)||7, player, y:1935, m:11, turn:0, owner:{}, rel:{}, wars:[], treaties:[], nat:{}, fort:{}, fronts:[], tension:22, ev:{}, log:[], news:[], claims:{}, flash:[], lastCap:{}};
+  S={v:4, betray:[], factions:[], ideo:{}, occ:{}, seed:(Date.now()>>>0)||7, player, y:1935, m:11, turn:0, owner:{}, rel:{}, wars:[], treaties:[], nat:{}, fort:{}, fronts:[], tension:22, ev:{}, log:[], news:[], claims:{}, flash:[], lastCap:{}};
   RIDS.forEach(id=>S.owner[id]=REG[id].home);
-  NAT.forEach(c=>{ const n=D.N[c]; const regs=RIDS.filter(r=>REG[r].home===c).length; S.nat[c]={army:n[4], ind:n[5], q:n[6], mp:n[4]*6+regs*8, gold:40+n[5]*3, bud:defaultBud(c), stab:60, alive:regs>0, start:regs}; });
+  NAT.forEach(c=>{ const n=D.N[c]; const regs=RIDS.filter(r=>REG[r].home===c).length; S.nat[c]={army:n[4], ind:n[5], q:n[6], mp:n[4]*6+regs*8, gold:40+n[5]*3, bud:defaultBud(c), stab:60, alive:regs>0, start:regs, pp:n[8]?90:50, arm:({GER:2,SOV:3,FRA:2,UK:1,ITA:1,USA:1,JAP:1})[c]||0, art:Math.round(n[4]*0.2), air:Math.round(n[5]*0.3*10)/10, nav:({UK:12,USA:9,JAP:8,FRA:5,ITA:4,GER:2,SOV:2,NED:2})[c]??(n[5]>=3?1:0), wareco:false}; });
+  (D.PUPPETS||[]).forEach(([m,s])=>{ S.treaties.push({type:'puppet',a:m,b:s,t:0},{type:'alliance',a:m,b:s}); S.rel[rk(m,s)]=Math.max(S.rel[rk(m,s)]||0,60); });
   S.nat.CHI.stab=40; S.nat.ESP.stab=35; S.nat.FRA.stab=50;
   for(let i=0;i<NAT.length;i++) for(let j=i+1;j<NAT.length;j++) S.rel[rk(NAT[i],NAT[j])]=clamp(ideoAff(NAT[i],NAT[j])+5,-100,100);
   const set=(a,b,v)=>S.rel[rk(a,b)]=v;
@@ -57,7 +60,7 @@ function newGame(player){
   for(const c in D.CLAIMS) S.claims[c]=D.CLAIMS[c].slice();
   log('event',`1 December 1935. Italy's columns grind into Abyssinia; China bleeds in civil war; Europe holds its breath. You lead ${nm(player)}.`);
   news(`Dec 1935: Italian troops advance in Abyssinia · Chinese civil war drags on`);
-  S.lastReport=null; if(window.B2Link) B2Link.newGame(); autosave(); dirty=true; renderAll(); centerOn(player);
+  S.lastReport=null; autosave(); dirty=true; renderAll(); centerOn(player);
 }
 function defaultBud(c){ return {fascist:0.35,communist:0.35,authoritarian:0.22,democratic:0.12}[IDEO(c)]; }
 const rel=(a,b)=>a===b?100:(S.rel[rk(a,b)]??0);
@@ -70,7 +73,7 @@ const enemiesOf=c=>S.wars.filter(w=>w.a===c||w.b===c).map(w=>w.a===c?w.b:w.a);
 const hasT=(t,a,b)=>S.treaties.some(x=>x.type===t&&((x.a===a&&x.b===b)||(x.a===b&&x.b===a)));
 const alliesOf=c=>S.treaties.filter(t=>t.type==='alliance'&&(t.a===c||t.b===c)).map(t=>t.a===c?t.b:t.a).filter(alive);
 const guarantorsOf=c=>S.treaties.filter(t=>t.type==='guarantee'&&t.b===c).map(t=>t.a).filter(alive);
-const eff=c=>S.nat[c].army*S.nat[c].q*(0.7+S.nat[c].stab/200);
+const eff=c=>{ const n=S.nat[c]; return (n.army+2.8*(n.arm||0)+0.9*(n.art||0)+0.6*(n.air||0))*n.q*(0.7+n.stab/200); };
 const capOf=c=>{ const cap=D.N[c][7]; return S.owner[cap]===c?cap:regionsOf(c)[0]; };
 function borderRegs(a,b,landOnly){ const A=landOnly?LANDADJ:ADJ; return regionsOf(b).filter(r=>[...A[r]].some(x=>S.owner[x]===a)); }
 const neighbours=c=>{ const s=new Set(); regionsOf(c).forEach(r=>ADJ[r].forEach(x=>{ const o=S.owner[x]; if(o!==c) s.add(o); })); return [...s].filter(alive); };
@@ -78,12 +81,13 @@ function log(kind,text){ S.log.unshift({d:dateStr(),kind,text}); if(S.log.length
 function news(t){ S.news.unshift(t); if(S.news.length>14) S.news.length=14; }
 function hops(c){ // BFS distance through own territory from capital (cached per turn)
   S._hops=S._hops||{}; const key=c+S.turn+':'+regionsOf(c).length; if(S._hops[c]&&S._hops[c].k===key) return S._hops[c].d;
-  const d={}, cap=capOf(c); if(cap){ d[cap]=0; const q=[cap]; while(q.length){ const r=q.shift(); for(const x of LANDADJ[r]) if(S.owner[x]===c&&d[x]==null){ d[x]=d[r]+1; q.push(x);} } }
+  const d={}, cap=capOf(c); if(cap){ d[cap]=0; const q=[cap]; if((S.nat[c].nav||0)>=1) regionsOf(c).forEach(r=>{ if(COAST.has(r)&&r!==cap){ d[r]=3; q.push(r); } }); while(q.length){ const r=q.shift(); for(const x of LANDADJ[r]) if(S.owner[x]===c&&d[x]==null){ d[x]=d[r]+1; q.push(x);} } }
   S._hops[c]={k:key,d}; return d; }
 
 /* ================= WAR & COMBAT ================= */
 function declareWar(a,b,motive,silentJoin){
   if(a===b||atWar(a,b)||!alive(a)||!alive(b)) return;
+  const broken=pactsBetween(a,b).filter(t=>['alliance','puppet','guarantee','non_aggression','access'].includes(t.type)); if(broken.length){ leaveFactionPair(a,b); betray(a,b,broken.sort((x,y)=>BINDING.indexOf(x.type)-BINDING.indexOf(y.type))[0].type); }
   S.wars.push({a,b,since:dateStr(),m:0,motive});
   S.treaties=S.treaties.filter(t=>!((t.a===a&&t.b===b)||(t.a===b&&t.b===a)));
   addRel(a,b,-50); S.tension=clamp(S.tension+(D.N[a][8]||D.N[b][8]?8:4),0,100);
@@ -91,12 +95,12 @@ function declareWar(a,b,motive,silentJoin){
   const joiners=[...new Set(alliesOf(b).concat(guarantorsOf(b)))].filter(x=>x!==a&&!atWar(x,a)&&!alliesOf(a).includes(x));
   for(const x of joiners){ const p=x===S.player?1:(alliesOf(b).includes(x)?0.85:0.75)*(rel(x,b)>20?1:0.5); if(rnd()<p){ S.wars.push({a:x,b:a,since:dateStr(),m:0,motive:`honouring its pact with ${nm(b)}`}); addRel(x,a,-40); log('war',`⚔ ${nm(x)} joins the war against ${nm(a)}, honouring its pact with ${nm(b)}.`); news(`${nm(x)} enters the war`); } }
   // puppets follow masters
-  alliesOf(a).filter(x=>['MAN','MON'].includes(x)&&!atWar(x,b)).forEach(x=>S.wars.push({a:x,b,since:dateStr(),m:0,motive:`following ${nm(a)}`}));
+  S.treaties.filter(t=>t.type==='puppet'&&t.a===a).map(t=>t.b).concat(alliesOf(a).filter(x=>['MAN','MON'].includes(x))).filter(x=>alive(x)&&!atWar(x,b)&&x!==b).forEach(x=>S.wars.push({a:x,b,since:dateStr(),m:0,motive:`following ${nm(a)}`}));
 }
 function makePeace(a,b,why){ S.wars=S.wars.filter(w=>!((w.a===a&&w.b===b)||(w.a===b&&w.b===a))); S.fronts=S.fronts.filter(f=>!((f.a===a&&f.d===b)||(f.a===b&&f.d===a))); log('peace',`🕊 ${nm(a)} and ${nm(b)} make peace${why?' — '+why:''}.`); news(`Peace between ${nm(a)} and ${nm(b)}`); }
 function pickTarget(a,d,prefer){
   if(prefer&&S.owner[prefer]===d&&[...ADJ[prefer]].some(x=>S.owner[x]===a)) return prefer;
-  const cand=borderRegs(a,d,false); if(!cand.length) return null;
+  const cand=borderRegs(a,d,false); S.treaties.filter(t=>t.type==='access'&&(t.a===a||t.b===a)).map(t=>t.a===a?t.b:t.a).forEach(x=>regionsOf(d).forEach(r=>{ if(!cand.includes(r)&&[...ADJ[r]].some(y=>S.owner[y]===x)) cand.push(r); })); if(!cand.length) return null;
   const hd=hops(d), land=new Set(borderRegs(a,d,true));
   const score=x=>{ const T=TERR[REG[x].t][1]+(REG[x].river?0.25:0); return T*(1+0.2*(S.fort[x]||0))*(D.N[d][7]===x?1.4:1)*(land.has(x)?1:1.7)*10+(hd[x]??20)*0.5; };
   cand.sort((x,y)=>score(x)-score(y)); return cand[0]; }
@@ -105,12 +109,13 @@ function openFront(a,d,prefer){ const ex=S.fronts.find(f=>f.a===a&&f.d===d); if(
 function frontCalc(f){
   const a=f.a, d=f.d, r=f.r, nA=S.fronts.filter(x=>x.a===a).length, nD=Math.max(1,enemiesOf(d).length);
   const landLink=[...LANDADJ[r]].some(x=>S.owner[x]===a); const hd=hops(a); const nearest=Math.min(...[...ADJ[r]].filter(x=>S.owner[x]===a).map(x=>hd[x]??12));
-  const supply=clamp(1.1-nearest*0.035,0.45,1)*(landLink?1:0.6);
+  const oos=!isFinite(nearest)||nearest>14; const navR=(S.nat[a].nav+0.5)/(S.nat[a].nav+S.nat[d].nav+1); const supply=oos?0.35:clamp(1.1-nearest*0.04,0.45,1)*(landLink?1:clamp(0.25+0.7*navR,0.25,0.9));
+  const airA=S.nat[a].air||0, airD=S.nat[d].air||0, airSup=(airA-airD)/(airA+airD+2);
   const T=TERR[REG[r].t]; const terr=T[1]+(REG[r].river?0.25:0); const fort=1+0.2*(S.fort[r]||0); const cap=(D.N[d][7]===r)?1.4:1;
-  const A=eff(a)*0.8/Math.max(1,nA)*supply;
-  let Dd=eff(d)*0.5/nD*terr*fort*cap*1.25;
+  const A=eff(a)*0.8/Math.max(1,nA)*supply*(1+0.25*airSup);
+  let Dd=eff(d)*0.5/nD*terr*fort*cap*1.25*(1+0.4*(S.nat[d].art||0)/Math.max(4,S.nat[d].army))*(1-0.15*airSup);
   let help=0; enemiesOf(a).filter(x=>x!==d&&[...LANDADJ[r]].some(y=>S.owner[y]===x)).forEach(x=>help+=eff(x)*0.25/Math.max(1,enemiesOf(x).length)); Dd+=help;
-  return {A, D:Dd, ratio:A/Math.max(0.3,Dd), supply, terr:T[0]+(REG[r].river?' + river':''), fort:S.fort[r]||0, help};
+  return {A, D:Dd, ratio:A/Math.max(0.3,Dd), supply, oos, airA, airD, terr:T[0]+(REG[r].river?' + river':''), fort:S.fort[r]||0, help};
 }
 function resolveFront(f){
   if(!atWar(f.a,f.d)||!alive(f.a)||!alive(f.d)) return 'drop';
@@ -118,13 +123,15 @@ function resolveFront(f){
   const c=frontCalc(f); const delta=clamp(40*(c.ratio-0.8)*(0.75+rnd()*0.5),-15,45);
   f.prog=clamp(f.prog+delta,0,100);
   const la=Math.min(S.nat[f.a].army*0.06, 0.03*c.D*(1.2/Math.sqrt(Math.max(0.2,c.ratio)))), ld=Math.min(S.nat[f.d].army*0.06, 0.03*c.A*Math.sqrt(c.ratio));
-  S.nat[f.a].army=Math.max(0.5,S.nat[f.a].army-la); S.nat[f.d].army=Math.max(0.5,S.nat[f.d].army-ld);
-  f.last={delta:Math.round(delta), ratio:+c.ratio.toFixed(2), la:+la.toFixed(1), ld:+ld.toFixed(1), terr:c.terr, supply:+c.supply.toFixed(2), fort:c.fort};
+  const harsh=['m','j','a','s'].includes(REG[f.r].t)?0.01:0, attr=S.nat[f.a].army*(0.008+harsh+(c.oos?0.03:0));
+  const hit=(n,l)=>{ n.army=Math.max(0.5,n.army-l*0.8); n.arm=Math.max(0,(n.arm||0)-l*0.08); n.art=Math.max(0,(n.art||0)-l*0.05); n.air=Math.max(0,(n.air||0)-l*0.03); };
+  hit(S.nat[f.a],la+attr); hit(S.nat[f.d],ld);
+  f.last={delta:Math.round(delta), ratio:+c.ratio.toFixed(2), la:+(la+attr).toFixed(1), ld:+ld.toFixed(1), terr:c.terr, supply:+c.supply.toFixed(2), fort:c.fort, oos:c.oos};
   if(f.prog>=100){ capture(f.a,f.r,f.d); f.prog=0; const t=pickTarget(f.a,f.d); if(!t) return 'drop'; f.r=t; }
   return 'ok';
 }
 function capture(a,r,d){
-  S.owner[r]=a; S.flash.push(r); S.fort[r]=Math.max(0,(S.fort[r]||0)-1); S.lastCap[r]=S.turn;
+  S.owner[r]=a; S.flash.push(r); S.fort[r]=Math.max(0,(S.fort[r]||0)-1); S.lastCap[r]=S.turn; if(REG[r].home!==a) S.occ[r]={t:S.turn,res:10}; else delete S.occ[r];
   const share=S.nat[d].ind/Math.max(1,regionsOf(d).length+1)*0.6; S.nat[d].ind=Math.max(0.5,S.nat[d].ind-share); S.nat[a].ind+=share*0.5;
   S.nat[d].stab=clamp(S.nat[d].stab-6,0,100); S.nat[a].stab=clamp(S.nat[a].stab+2,0,100);
   log('border',`🏴 ${nm(a)} captures ${REG[r].name} from ${nm(d)}.`); news(`${REG[r].name} falls to ${nm(a)}`);
@@ -133,12 +140,12 @@ function capture(a,r,d){
 function checkCapitulation(d,a){
   const regs=regionsOf(d); const lostCap=S.owner[D.N[d][7]]!==d;
   if(!regs.length || (lostCap && (regs.length<=S.nat[d].start*0.6 || S.nat[d].army<2 || S.nat[d].stab<20))){
-    regs.forEach(r=>{ S.owner[r]=a; S.flash.push(r); });
+    regs.forEach(r=>{ S.owner[r]=a; S.flash.push(r); S.occ[r]={t:S.turn,res:15}; });
     S.nat[d].alive=false; S.wars=S.wars.filter(w=>w.a!==d&&w.b!==d); S.fronts=S.fronts.filter(f=>f.a!==d&&f.d!==d); S.treaties=S.treaties.filter(t=>t.a!==d&&t.b!==d);
     S.tension=clamp(S.tension+6,0,100); log('war',`☠ ${nm(d)} capitulates. Its lands pass to ${nm(a)}.`); news(`${nm(d).toUpperCase()} CAPITULATES`);
     return true; } return false;
 }
-function transfer(r,to,why){ const from=S.owner[r]; if(from===to) return; S.owner[r]=to; S.flash.push(r); log('border',`🏴 ${REG[r].name} passes from ${nm(from)} to ${nm(to)}${why?' — '+why:''}.`); if(!regionsOf(from).length){ S.nat[from].alive=false; S.wars=S.wars.filter(w=>w.a!==from&&w.b!==from); S.fronts=S.fronts.filter(f=>f.a!==from&&f.d!==from); S.treaties=S.treaties.filter(t=>t.a!==from&&t.b!==from); log('border',`${nm(from)} ceases to exist.`);} }
+function transfer(r,to,why){ const from=S.owner[r]; if(from===to) return; S.owner[r]=to; S.flash.push(r); if(REG[r].home!==to) S.occ[r]={t:S.turn,res:why&&/ceded|concession/.test(why)?5:10}; else delete S.occ[r]; log('border',`🏴 ${REG[r].name} passes from ${nm(from)} to ${nm(to)}${why?' — '+why:''}.`); if(!regionsOf(from).length){ S.nat[from].alive=false; S.wars=S.wars.filter(w=>w.a!==from&&w.b!==from); S.fronts=S.fronts.filter(f=>f.a!==from&&f.d!==from); S.treaties=S.treaties.filter(t=>t.a!==from&&t.b!==from); log('border',`${nm(from)} ceases to exist.`);} }
 
 /* ================= ECONOMY ================= */
 function economyTick(){
@@ -149,7 +156,19 @@ function economyTick(){
     let g=n.ind*n.bud*0.09*(n.gold<0?0.4:1); const need=g*6; if(n.mp<need) g=n.mp/6; n.army+=g; n.mp-=g*6;
     const growth=(n.ind*(1-n.bud)*0.005+0.01)*(n.stab<35?0.5:1); n.ind+=growth;
     n.stab=clamp(n.stab+(war?-1.2:0)+(n.stab<60?0.6:-0.3)+(n.gold<0?-2:0),0,100);
-    if(c==='GER'&&S.y>=1936) n.q=Math.min(1.3,n.q+0.002); }
+    if(c==='GER'&&S.y>=1936) n.q=Math.min(1.3,n.q+0.002);
+    n.pp=Math.min(200,(n.pp||0)+4+n.stab/25);
+    n.gold+=S.treaties.filter(t=>t.type==='trade'&&(t.a===c||t.b===c)).length;
+    const m=masterOf(c); if(m&&alive(m)){ const tr=n.ind*0.1; n.gold-=tr; S.nat[m].gold+=tr; }
+    n.gold-=(n.arm||0)*0.15+(n.air||0)*0.1+(n.nav||0)*0.2;
+    if(n.wareco){ n.army+=g*0.35; n.ind-=growth*0.4; n.stab-=0.3; }
+    if(n.ind>=8&&c!==S.player){ n.arm=(n.arm||0)+g*0.1; n.art=(n.art||0)+g*0.12; n.air=(n.air||0)+n.ind*0.004; if(MAJOR(c)&&coastal(c)) n.nav=(n.nav||0)+n.ind*0.002; } }
+  // occupation & resistance
+  for(const r in S.occ){ const o=S.occ[r], c=S.owner[r], h=REG[r].home; if(c===h||!alive(c)){ delete S.occ[r]; continue; }
+    o.res=clamp(o.res+2+(alive(h)?2:0)+(alive(h)&&atWar(c,h)?2:0)+(ideoAff(c,h)<0?1:0)-(S.nat[c].army>40?1:0),0,100);
+    S.nat[c].gold-=0.3+o.res/60; S.nat[c].army=Math.max(0.5,S.nat[c].army-o.res/2000);
+    if(c!==S.player&&o.res>60&&S.nat[c].gold>20&&rnd()<0.3){ o.res-=25; S.nat[c].gold-=15; }
+    if(o.res>=100){ if(alive(h)&&rnd()<0.5){ transfer(r,h,'a popular uprising'); news(`Uprising: ${REG[r].name} throws out ${nm(c)}`); } else { o.res=60; S.nat[c].army=Math.max(0.5,S.nat[c].army-1); log('event',`Partisans ambush ${nm(c)}'s garrison in ${REG[r].name}.`); } } }
 }
 
 /* ================= AI BEHAVIOUR ================= */
@@ -253,163 +272,196 @@ async function runEvents(){
   }
 }
 
-/* ================= INTENT PARSER ================= */
-const NAT_ALIAS={GER:'germany german germans reich third reich nazi nazis hitler wehrmacht',UK:'britain british england english uk united kingdom brits chamberlain baldwin churchill',FRA:'france french frenchmen',ITA:'italy italian italians mussolini duce',
- SOV:'soviet soviets ussr russia russian russians stalin red army',JAP:'japan japanese nippon hirohito',USA:'america american americans usa united states roosevelt yanks',CHI:'china chinese chiang kuomintang kmt',CCP:'chinese communists ccp mao',
- POL:'poland polish poles',CZE:'czechoslovakia czech czechs slovak',AUT:'austria austrian austrians',ESP:'spain spanish spaniards spanish republic',NSP:'franco nationalist spain falangists',MAN:'manchukuo manchuria puyi',ETH:'ethiopia ethiopian abyssinia abyssinian haile selassie',
- HUN:'hungary hungarian hungarians',ROM:'romania romanian romanians rumania',YUG:'yugoslavia yugoslav yugoslavs serbs',BUL:'bulgaria bulgarian bulgarians',GRE:'greece greek greeks',TUR:'turkey turkish turks ataturk',FIN:'finland finnish finns',SWE:'sweden swedish swedes',NOR:'norway norwegian norwegians',DEN:'denmark danish danes',
- NED:'netherlands dutch holland',BEL:'belgium belgian belgians',SWI:'switzerland swiss',POR:'portugal portuguese',IRE:'ireland irish',LIT:'lithuania lithuanian',LAT:'latvia latvian',EST:'estonia estonian',ALB:'albania albanian',LUX:'luxembourg',DNZ:'free city',
- MEX:'mexico mexican',BRA:'brazil brazilian',ARG:'argentina argentine argentinian',CAN:'canada canadian canadians',AUS:'australia australian australians aussies',NZL:'new zealand kiwis',SAF:'south africa south african',EGY:'egypt egyptian',IRN:'iran iranian persia persian',
- IRQ:'iraq iraqi',SAU:'saudi arabia saudi saudis',AFG:'afghanistan afghan',SIA:'siam siamese thailand thai',MON:'mongolia mongolian',TIB:'tibet tibetan',CUB:'cuba cuban',CHL:'chile chilean',PRU:'peru peruvian',COL:'colombia colombian',VEN:'venezuela venezuelan',BOL:'bolivia bolivian',PAR:'paraguay paraguayan',URU:'uruguay uruguayan',ECU:'ecuador',
- SHX:'shanxi clique yan xishan',GXC:'guangxi clique',YUN:'yunnan clique',SZC:'sichuan clique',XIN:'xinjiang',NEP:'nepal',YEM:'yemen',LBR:'liberia',CAM:'central america guatemala',DOM:'hispaniola haiti dominican'};
-const REG_ALIAS={dnz:'danzig gdansk',sud:'sudetenland sudeten',rhi:'rhineland',saa:'saar saarland',als:'alsace lorraine maginot',mem:'memel klaipeda',poz:'corridor polish corridor poznan posen',sil:'silesia',boh:'prague bohemia',vie:'vienna',war:'warsaw',ber:'berlin',bav:'munich bavaria',par:'paris',lon:'london',rom:'rome',pie:'milan turin',mos:'moscow',len:'leningrad',sta:'stalingrad',kie:'kiev ukraine',ode:'odessa',cri:'crimea sevastopol',cau:'caucasus',tra:'baku georgia transcaucasia',blr:'minsk belarus byelorussia',bes:'bessarabia',trn:'transylvania',kar:'karelia mannerheim',tok:'tokyo',kor:'korea seoul',tai:'taiwan formosa',sha:'shanghai',bjg:'peking peiping beijing',nan:'nanking nanjing',del:'india delhi',ben:'calcutta bengal',bom:'bombay',brm:'burma rangoon',mal:'malaya singapore',gdg:'canton hong kong guangdong',egy:'suez cairo',and:'gibraltar seville',tnk:'hanoi tonkin indochina',coc:'saigon',luz:'philippines manila luzon',jav:'java batavia',sum:'sumatra',lib:'libya tripoli',tun:'tunisia tunis',alg:'algeria algiers',mor:'morocco casablanca',syr:'syria damascus',pal:'palestine jerusalem',aes:'sudan khartoum',bcg:'congo',mkd:'mukden',hsk:'hsinking',eth:'addis ababa',ist:'istanbul constantinople bosphorus',ana:'ankara',ath:'athens',bud:'budapest',hun:'budapest',ser:'belgrade',bul:'sofia',wal2:'bucharest',hel:'helsinki',sto:'stockholm',osl:'oslo',dzl:'copenhagen',ned:'amsterdam',bel:'brussels',mad:'madrid',por:'lisbon',ire:'dublin',wdc:'washington',nyc:'new york',cal:'california hollywood',ala:'alaska',tex:'texas',que:'quebec montreal',ont:'ontario toronto ottawa',nsw:'sydney',grl:'greenland',ice:'iceland',nar:'narvik',kyu:'kyushu',hok:'hokkaido',kft:'sakhalin karafuto'};
-const ALIAS=[]; // [regex, nation|null, region|null]
-(function(){ const add=(words,n,r)=>words.split(/\s{1}(?=[a-z])/).length&&0; 
-  const push=(phrase,n,r)=>{ if(phrase.length<3&&phrase!=='uk') return; ALIAS.push({re:new RegExp('\\b'+phrase.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'(?:s|\'s)?\\b','i'),n,r,len:phrase.length}); };
-  for(const c of NAT){ push(nm(c).toLowerCase(),c,null); const a=NAT_ALIAS[c]; if(a){ const multi=['third reich','united kingdom','red army','united states','chinese communists','spanish republic','nationalist spain','haile selassie','new zealand','south africa','south african','saudi arabia','central america','free city','yan xishan','shanxi clique','guangxi clique','yunnan clique','sichuan clique'];
-    let rest=a; multi.forEach(m=>{ if(rest.includes(m)){ push(m,c,null); rest=rest.replace(m,' '); } }); rest.split(/\s+/).filter(Boolean).forEach(w=>push(w,c,null)); } }
-  for(const id of RIDS){ push(REG[id].name.toLowerCase().replace(/\s*\(.*\)/,''),null,id); }
-  for(const id in REG_ALIAS){ const a=REG_ALIAS[id]; const multi=['polish corridor','hong kong','addis ababa','new york']; let rest=a; multi.forEach(m=>{ if(rest.includes(m)){ push(m,null,id); rest=rest.replace(m,' ');} }); rest.split(/\s+/).filter(Boolean).forEach(w=>push(w,null,id)); }
-  ALIAS.sort((x,y)=>y.len-x.len);
-})();
-const INTENTS=[
- ['peace',/\b(peace|armistice|cease-?fire|truce|end (the|this|our) war|stop (the )?(war|fighting)|surrender)\b/],
- ['nap',/\b(non-?aggression|nap|neutrality pact|pact of neutrality)\b/],
- ['guarantee',/\b(guarantee|protect|safeguard|defend (them|their|its|the independence)|independence of)\b/],
- ['alliance',/\b(ally|allies|alliance|allied|join (us|our|forces|the war)|axis|coalition|military pact|defensive pact|faction|side with)\b/],
- ['embargo',/\b(embargo|sanction|sanctions|blockade|boycott|cut (off )?(trade|oil))\b/],
- ['demand',/\b(demand|ultimatum|annex|annexe|cede|hand over|give (us|me|back)|take back|reclaim|return .{0,20} to us|claim)\b/],
- ['attack',/\b(invade|invasion|attack|war (on|with|against)|declare war|conquer|strike|bomb|blitz|blitzkrieg|march (on|into|to)|occupy|assault|crush|destroy|seize|take|offensive|push into|liberate)\b/],
- ['spy',/\b(spy|spies|espionage|sabotage|infiltrat\w*|agents?|intel\w*|assassinat\w*|coup|subvert|steal (plans|secrets))\b/],
- ['propaganda',/\b(propaganda|radio|leaflets?|newspapers?|speech|rally|rallies|posters?|morale|inspire|nationalism)\b/],
- ['mobilize',/\b(mobili[sz]\w*|conscript\w*|draft|call up|total war)\b/],
- ['build_industry',/\b(factor(y|ies)|industr\w*|five-?year|econom\w*|infrastructure|railways?|steel mills?|build (roads|plants|refineries)|civilian)\b/],
- ['build_army',/\b(build (up )?(the |my |our )?(army|military|tanks|planes|divisions|navy|fleet|air ?force)|more (tanks|troops|soldiers|planes|divisions|ships)|recruit\w*|train (troops|soldiers|army)|rearm\w*|(grow|expand|strengthen) (the |my |our )?(army|military))\b/],
- ['fortify',/\b(fortif\w*|bunkers?|defen[cs]e lines?|wall|entrench\w*|dig in|forts?|defend (my|our|the) (border|frontier|country|homeland))\b/],
- ['trade',/\b(trade|commerce|exports?|imports?|buy|sell|deal|loan|oil|iron|coal|steel|rubber|economic (deal|ties))\b/],
- ['budget',/\b(budget|spending|spend more on|military spending|war economy)\b/],
- ['insult',/\b(insult|threaten|denounce|condemn|mock|humiliate)\b/],
- ['talk',/\b(talk|negotiat\w*|diplomac\w*|befriend|friend\w*|improve relations|envoy|ambassador|meet|visit|praise|gift|charm|court)\b/],
- ['advisor',/\b(advice|advise|advisor|what should|help me|suggest|recommend|briefing)\b/],
-];
-function detectTargets(text){ const found=[]; for(const a of ALIAS){ const m=a.re.exec(text); if(m&&!found.some(f=>m.index<f.end&&m.index+m[0].length>f.start)) found.push({start:m.index,end:m.index+m[0].length,n:a.n||S.owner[a.r],r:a.r,word:m[0]}); } return found.sort((x,y)=>x.start-y.start); }
-function parseIntent(text, fallbackTarget){
-  const t=' '+text.toLowerCase().replace(/[’']/g,"'")+' ';
-  let intent=null; for(const [k,re] of INTENTS){ if(re.test(t)){ intent=k; break; } }
-  if(intent==='attack'&&/\btake back\b|\breclaim\b/.test(t)) intent='demand';
-  const tg=detectTargets(t); const foreign=tg.filter(x=>x.n&&x.n!==S.player&&alive(x.n));
-  let target=null, region=null;
-  const own=tg.find(x=>x.n===S.player&&x.r);
-  if(foreign.length){ target=foreign[0].n; region=foreign.find(x=>x.r)?.r||null; if(region&&S.owner[region]!==target) target=S.owner[region]; }
-  else if(['fortify','propaganda','mobilize','build_army','build_industry','budget'].includes(intent)) { target=S.player; region=own?own.r:null; }
-  else target=fallbackTarget;
-  const pct=(t.match(/(\d{1,2})\s*%/)||[])[1];
-  return {intent, target, region, pct:pct?+pct:null, mentions:tg.map(x=>x.word)};
-}
-
-/* ================= PLAYER ACTIONS ================= */
+/* ================= ACTIONS: diplomacy / intrigue / economy / military (rules only) ================= */
 const P=()=>S.player;
-function cost(g){ const n=S.nat[P()]; if(n.gold<g) return `Treasury only has ${Math.floor(n.gold)} gold; this costs ${g}. Raise industry or cut the army budget.`; n.gold-=g; return null; }
-const V=(...a)=>pick(a);
-function act(kind,T,R,text){
-  const p=P(), pn=nm(p), tn=T?nm(T):'', you=S.nat[p];
-  const fail=(msg)=>({ok:false,narr:msg});
-  if(T&&!alive(T)) return fail(`${tn} no longer exists.`);
-  const selfOnly=['mobilize','build_army','build_industry','budget'];
-  if(!selfOnly.includes(kind)&&kind!=='fortify'&&kind!=='propaganda'&&kind!=='advisor'&&T===p) return fail(`That order needs a foreign target. Tap another country, or name one, e.g. "${kind==='attack'?'Invade Poland':'Ally with Italy'}".`);
-  switch(kind){
-  case 'attack':{
-    if(!T) return fail('Attack whom? Name a country, e.g. "Invade Poland".');
-    if(hasT('alliance',p,T)) return fail(`${tn} is your ally. Break the alliance first (insult or denounce them).`);
-    const reach=pickTarget(p,T,R);
-    let narr='';
-    if(!atWar(p,T)){ declareWar(p,T,text?`"${text.slice(0,60)}"`:'your direct order');
-      narr=V(`Sirens wail across ${REG[capOf(p)].name}. ${pn} is at war with ${tn}.`,`The ultimatum expires at dawn. ${pn} declares war on ${tn}.`,`Your signature is still wet on the order: war with ${tn}.`)+' '; }
-    if(!reach){ return {ok:true,narr:narr+`But there is no common border or sea lane — your armies cannot reach ${tn} yet. Conquer a neighbour of theirs, or ally with someone who borders them.`}; }
-    const f=openFront(p,T,reach); const c=frontCalc(f);
-    narr+=`Offensive ordered into ${REG[f.r].name} (${c.terr}${c.fort?`, forts ${c.fort}`:''}). Strength ratio ${c.ratio.toFixed(2)}:1, supply ${Math.round(c.supply*100)}%. `+(c.ratio<0.8?`Your generals warn this attack will likely fail.`:c.ratio<1.3?`Expect a grinding, multi-month fight.`:`The enemy line looks brittle.`);
-    return {ok:true,narr}; }
-  case 'peace':{
-    if(!atWar(p,T)) return fail(`You are not at war with ${tn}.`);
-    const mine=RIDS.filter(r=>S.owner[r]===p&&REG[r].home===T).length, theirs=RIDS.filter(r=>S.owner[r]===T&&REG[r].home===p).length;
-    const score=(mine-theirs)/Math.max(1,S.nat[T].start)*100 + (eff(p)-eff(T))/Math.max(1,eff(T))*20 + (100-S.nat[T].stab)/3;
-    if(score>15||rnd()<0.15){ makePeace(p,T,'negotiated'); return {ok:true,narr:`White flags over the trenches. ${tn} signs an armistice. You keep what you hold.`}; }
-    addRel(p,T,3); return {ok:true,narr:`${tn} rejects your peace feelers — they think they are winning (war score ${Math.round(score)}).`}; }
-  case 'alliance':{
-    if(atWar(p,T)) return fail(`You are at war with ${tn}. Make peace first.`);
-    if(hasT('alliance',p,T)) return fail(`You are already allied with ${tn}.`);
-    const r0=rel(p,T); const enemyLink=enemiesOf(p).some(e=>hasT('alliance',T,e));
-    if(r0>=55&&ideoAff(p,T)>-20&&!enemyLink){ S.treaties.push({type:'alliance',a:p,b:T}); addRel(p,T,10); S.tension+=2; return {ok:true,narr:`In a wood-panelled room, ${pn} and ${tn} sign a military alliance. An attack on one is an attack on both.`}; }
-    addRel(p,T,4); return {ok:true,narr:`${tn} declines. ${r0<55?`Relations (${r0}) are not yet warm enough — they need 55+.`:''} ${ideoAff(p,T)<=-20?'Their regime distrusts yours on principle.':''} ${enemyLink?'They are allied with your enemy.':''} (+4 relations for trying)`}; }
-  case 'nap':{
-    if(atWar(p,T)) return fail(`You are at war with ${tn}.`);
-    if(hasT('non_aggression',p,T)) return fail(`A non-aggression pact with ${tn} already exists.`);
-    if(rel(p,T)>=5||eff(p)>eff(T)*1.5){ S.treaties.push({type:'non_aggression',a:p,b:T}); addRel(p,T,8); return {ok:true,narr:`${pn} and ${tn} sign a ten-year non-aggression pact. Neither believes it will last ten years.`}; }
-    addRel(p,T,3); return {ok:true,narr:`${tn} refuses a pact (relations ${rel(p,T)}; they want at least 5).`}; }
-  case 'guarantee':{
-    if(hasT('guarantee',p,T)) return fail(`You already guarantee ${tn}.`);
-    S.treaties.push({type:'guarantee',a:p,b:T}); addRel(p,T,15); const foes=NAT.filter(x=>alive(x)&&(S.claims[x]||[]).some(r=>S.owner[r]===T)); foes.forEach(x=>addRel(p,x,-12));
-    return {ok:true,narr:`You publicly guarantee the independence of ${tn}. If anyone attacks them, you go to war.${foes.length?` ${foes.map(nm).join(', ')} take${foes.length>1?'':'s'} this as a provocation.`:''}`}; }
-  case 'talk':{
-    const e=cost(5); if(e) return fail(e);
-    const g=Math.round(5+rnd()*9+ideoAff(p,T)/5); addRel(p,T,g);
-    return {ok:true,narr:V(`Your ambassador shares brandy and maps with ${tn}'s foreign minister.`,`Envoys exchange gifts and veiled threats in ${REG[capOf(T)].name}.`,`A state visit: brass bands, cold smiles, warm toasts.`)+` Relations ${g>=0?'+':''}${g} → ${rel(p,T)}.`}; }
-  case 'insult':{ addRel(p,T,-18); you.stab=clamp(you.stab+3,0,100); S.treaties=S.treaties.filter(t=>!(t.type==='alliance'&&((t.a===p&&t.b===T)||(t.a===T&&t.b===p))));
-    return {ok:true,narr:`You denounce ${tn} on the radio. Crowds cheer at home (+3 stability); relations crash to ${rel(p,T)}.`}; }
-  case 'trade':{
-    if(atWar(p,T)) return fail(`You can't trade with an enemy.`);
-    if(hasT('embargo',T,p)) return fail(`${tn} is under embargo.`);
-    const gain=Math.round(5+S.nat[T].ind*0.6); you.gold+=gain; you.ind+=0.3; S.nat[T].ind+=0.2; addRel(p,T,6); if(!hasT('trade',p,T)) S.treaties.push({type:'trade',a:p,b:T});
-    return {ok:true,narr:V(`Freight trains of coal and iron ore roll between ${pn} and ${tn}.`,`Tankers and freighters sail; ${tn}'s raw materials feed your furnaces.`)+` +${gain} gold, +0.3 industry, relations +6.`}; }
-  case 'embargo':{
-    const e=cost(5); if(e) return fail(e);
-    S.nat[T].ind=Math.max(0.5,S.nat[T].ind-0.6); S.nat[T].stab-=3; addRel(p,T,-15); S.treaties=S.treaties.filter(t=>!(t.type==='trade'&&((t.a===p&&t.b===T)||(t.a===T&&t.b===p)))); S.treaties.push({type:'embargo',a:p,b:T});
-    return {ok:true,narr:`Your ports close to ${tn}'s ships. Their factories starve for oil (−0.6 industry, −3 stability); relations −15.`}; }
-  case 'spy':{
-    const e=cost(15); if(e) return fail(e);
-    const r=rnd(); let narr=V(`Agents slip into ${tn} on a moonless night.`,`A forged passport, a suitcase radio, a contact in ${REG[capOf(T)].name}.`)+' ';
-    const intel=`Intel: army ${S.nat[T].army.toFixed(0)} div (quality ${S.nat[T].q.toFixed(2)}), industry ${S.nat[T].ind.toFixed(1)}, stability ${Math.round(S.nat[T].stab)}${(S.claims[T]||[]).filter(x=>S.owner[x]===p).length?`, and they covet your ${(S.claims[T]||[]).filter(x=>S.owner[x]===p).map(x=>REG[x].name).join(', ')}`:''}.`;
-    if(r<0.6){ S.nat[T].ind=Math.max(0.5,S.nat[T].ind-0.4); S.nat[T].stab-=4; narr+=`Sabotage cripples a rail junction (−0.4 industry). ${intel}`; }
-    else narr+=`They find little beyond rumours. ${intel}`;
-    if(rnd()<0.25){ addRel(p,T,-20); narr+=` But one agent is caught — and talks. Relations −20.`; }
-    return {ok:true,narr}; }
-  case 'propaganda':{
-    const e=cost(10); if(e) return fail(e);
-    if(T===p||!T){ you.stab=clamp(you.stab+7,0,100); return {ok:true,narr:`Posters on every wall, marching bands, a stirring speech on the wireless. Stability +7 → ${Math.round(you.stab)}.`}; }
-    S.nat[T].stab-=6; addRel(p,T,-5); return {ok:true,narr:`Your radio towers beam propaganda deep into ${tn}. Unrest stirs in the cafés (−6 stability).`}; }
-  case 'mobilize':{
-    if(you.mp<15) return fail(`Not enough manpower to mobilize (${Math.floor(you.mp)}). Wait for reserves to grow.`);
-    const add=Math.min(you.mp/6, you.army*0.25+3); you.army+=add; you.mp-=add*6; you.stab-=8; you.bud=Math.max(you.bud,0.5); S.tension+=3;
-    return {ok:true,narr:`Mobilization posters go up overnight. +${add.toFixed(1)} divisions, budget raised to ${Math.round(you.bud*100)}% military, stability −8. Neighbours are alarmed.`}; }
-  case 'build_army':{
-    const e=cost(30); if(e) return fail(e); if(you.mp<12){ you.gold+=30; return fail(`Not enough manpower (${Math.floor(you.mp)}/12).`); }
-    const add=2+you.ind*0.08; you.army+=add; you.mp-=12; return {ok:true,narr:`New divisions drill on muddy fields. +${add.toFixed(1)} divisions (−30 gold, −12 manpower).`}; }
-  case 'build_industry':{
-    const e=cost(40); if(e) return fail(e); you.ind+=1.2; return {ok:true,narr:`Smokestacks rise over the river. +1.2 industry (more gold and faster army growth from next month). −40 gold.`}; }
-  case 'fortify':{
-    const e=cost(25); if(e) return fail(e);
-    let r=R&&S.owner[R]===p?R:null; if(!r&&T&&T!==p){ r=regionsOf(p).filter(x=>[...LANDADJ[x]].some(y=>S.owner[y]===T)).sort((a,b)=>(S.fort[a]||0)-(S.fort[b]||0))[0]||null; } if(!r){ const threat=regionsOf(p).filter(x=>[...LANDADJ[x]].some(y=>S.owner[y]!==p&&(atWar(p,S.owner[y])||rel(p,S.owner[y])<0))); r=threat.sort((a,b)=>(S.fort[a]||0)-(S.fort[b]||0))[0]||capOf(p); }
-    if((S.fort[r]||0)>=5){ you.gold+=25; return fail(`${REG[r].name} is already fortified to the maximum.`); }
-    S.fort[r]=(S.fort[r]||0)+1; return {ok:true,narr:`Concrete pours along the frontier at ${REG[r].name}. Fort level ${S.fort[r]} (each level adds +20% defence).`}; }
-  case 'budget':{
-    let b=text&&/(\d{1,2})\s*%/.test(text)?(+text.match(/(\d{1,2})\s*%/)[1])/100:(/factor|civil|industr/.test(text||'')?you.bud-0.1:you.bud+0.1);
-    you.bud=clamp(b,0.1,0.7); return {ok:true,narr:`Budget set: ${Math.round(you.bud*100)}% military, ${Math.round(100-you.bud*100)}% civilian.`}; }
-  case 'demand':{
-    if(atWar(p,T)) return fail(`You are already at war with ${tn} — take it by force (Attack).`);
-    const cand=borderRegs(p,T,false); let r=R&&S.owner[R]===T?R:((S.claims[p]||[]).find(x=>S.owner[x]===T&&cand.includes(x))||cand[0]);
-    if(!r) return fail(`${tn} has no territory bordering yours to demand.`);
-    if(!cand.includes(r)) return fail(`${REG[r].name} doesn't border your territory, so ${tn} laughs at the demand.`);
-    const def=coalition(T,p).reduce((s,x)=>s+eff(x)*(x===T?1:0.6),0), ratio=eff(p)/Math.max(0.5,def);
-    const claimed=(S.claims[p]||[]).includes(r);
-    const pr=clamp((ratio-1.6)*0.35+(claimed?0.15:0)-(T===S.player?1:0),0,0.85);
-    if(rnd()<pr){ transfer(r,p,'ceded under ultimatum'); addRel(p,T,-30); S.tension+=5; ['UK','FRA','SOV','USA'].filter(x=>x!==p&&x!==T&&alive(x)).forEach(x=>addRel(p,x,-6));
-      return {ok:true,narr:`Faced with your army (ratio ${ratio.toFixed(1)}:1), ${tn} buckles and cedes ${REG[r].name}. The great powers watch with growing alarm.`}; }
-    addRel(p,T,-20); S.tension+=3; return {ok:true,narr:`${tn} rejects your ultimatum over ${REG[r].name} (your strength vs their coalition: ${ratio.toFixed(1)}:1 — you need about 2:1). Relations −20. You could now take it by force.`}; }
-  case 'advisor': return {ok:true,narr:advisorText(T),noTime:true};
+const MAJOR=c=>!!D.N[c][8];
+const decay=(t,span)=>Math.max(0,1-(S.turn-t)/span);
+const TNAME={alliance:'alliance',non_aggression:'non-aggression pact',guarantee:'guarantee',trade:'trade deal',access:'military-access treaty',puppet:'protectorate treaty',embargo:'embargo'};
+function grudge(x,by){ return (S.betray||[]).filter(b=>b.victim===x&&b.by===by).reduce((s,b)=>s+55*decay(b.t,60),0); }
+function rep(by,except){ return (S.betray||[]).filter(b=>b.by===by&&b.victim!==except).reduce((s,b)=>s+16*decay(b.t,48),0); }
+function betray(by,victim,type){ S.betray.push({by,victim,type,t:S.turn,d:dateStr()}); addRel(by,victim,-40);
+  NAT.filter(x=>alive(x)&&x!==by&&x!==victim&&(MAJOR(x)||neighbours(by).includes(x))).forEach(x=>addRel(by,x,-8));
+  log('betrayal',`🗡 ${nm(by)} betrays ${nm(victim)} by breaking their ${TNAME[type]||type}. ${nm(victim)} will remember for years; every chancellery takes note.`);
+  news(`${nm(by).toUpperCase()} TEARS UP ITS ${(TNAME[type]||type).toUpperCase()} WITH ${nm(victim).toUpperCase()}`); }
+const pactsBetween=(a,b)=>S.treaties.filter(t=>(t.a===a&&t.b===b)||(t.a===b&&t.b===a));
+const BINDING=['alliance','puppet','guarantee','non_aggression','access','trade'];
+const factionOf=c=>S.factions.find(f=>f.members.includes(c));
+const factionLed=c=>S.factions.find(f=>f.leader===c);
+function leaveFactionPair(a,b){ const f=factionOf(a); if(f&&f.members.includes(b)){ f.members=f.members.filter(x=>x!==a); if(f.leader===a) f.leader=f.members[0]; if(f.members.length<2) S.factions=S.factions.filter(x=>x!==f); } }
+function breakPacts(a,b){ const ps=pactsBetween(a,b).filter(t=>BINDING.includes(t.type)); if(!ps.length) return []; S.treaties=S.treaties.filter(t=>!ps.includes(t)); leaveFactionPair(a,b);
+  betray(a,b,ps.slice().sort((x,y)=>BINDING.indexOf(x.type)-BINDING.indexOf(y.type))[0].type); return ps; }
+const isPuppet=(m,s)=>S.treaties.some(t=>t.type==='puppet'&&t.a===m&&t.b===s);
+const masterOf=s=>{ const t=S.treaties.find(t=>t.type==='puppet'&&t.b===s); return t?t.a:null; };
+const coastal=c=>regionsOf(c).some(r=>COAST.has(r));
+function warScore(a,T){ const mine=RIDS.filter(r=>S.owner[r]===a&&REG[r].home===T).length, theirs=RIDS.filter(r=>S.owner[r]===T&&REG[r].home===a).length;
+  return (mine-theirs)/Math.max(1,S.nat[T].start)*100+(eff(a)-eff(T))/Math.max(1,eff(T))*20+(100-S.nat[T].stab)/3; }
+function colonyOf(T){ const cap=capOf(T); if(!cap) return []; return regionsOf(T).filter(r=>Math.hypot(REG[r].lon-REG[cap].lon,REG[r].lat-REG[cap].lat)>28); }
+function demandRatio(a,T){ return eff(a)/Math.max(0.5,coalition(T,a).reduce((s,x)=>s+eff(x)*(x===T?1:0.6),0)); }
+/* acceptance model: every factor is shown to the player before committing */
+function accept(a,T,base,extra){ const f=[]; const add=(l,v)=>{ if(Math.abs(v)>=0.005) f.push([l,v]); };
+  add('base',base); add(`relations ${rel(a,T)}`,rel(a,T)/160); add(ideoAff(a,T)>=0?'kindred regimes':'hostile ideologies',ideoAff(a,T)/100);
+  const g=grudge(T,a); if(g>1){ const b=S.betray.filter(x=>x.victim===T&&x.by===a).slice(-1)[0]; add(`remembers your betrayal (${TNAME[b.type]||b.type}, ${b.d})`,-g/100); }
+  const r=rep(a,T); if(r>1) add('your record of broken treaties',-r/100);
+  (extra||[]).forEach(([l,v])=>add(l,v));
+  return {p:clamp(f.reduce((s,x)=>s+x[1],0),0.02,0.97),f}; }
+const pct=p=>Math.round(p*100)+'%';
+function reasons(od,neg=true){ return od.f.filter(x=>x[0]!=='base'&&(neg?x[1]<0:x[1]>0)).sort((x,y)=>neg?x[1]-y[1]:y[1]-x[1]).slice(0,3).map(x=>x[0]).join('; '); }
+const refuse=(a,T,what,od)=>`${nm(T)} refuses ${nm(a)}'s ${what}. Reason: ${reasons(od)||'the cabinet votes no despite the odds'}. (${pct(od.p)} chance)`;
+const accepted=(T,od)=>`${nm(T)} accepts (${pct(od.p)} chance; ${reasons(od,false)||'favourable terms'}).`;
+const addT=(type,a,b,extra)=>{ if(!hasT(type,a,b)) S.treaties.push(Object.assign({type,a,b,t:S.turn},extra||{})); };
+const notWar=(a,T)=>atWar(a,T)?`You are at war with ${nm(T)}.`:null;
+const BUILD={inf:[20,10,0,'Infantry (+2 div)'],arm:[45,6,8,'Armour (+1 div, 2.8× punch)'],art:[25,5,4,'Artillery (+1 div, +defence)'],air:[35,2,6,'Air wing (+1)'],nav:[50,3,6,'Fleet (+1)']};
+/* id: [tab, scope, label, cost(a,T)->{gold,pp,mp}, pre(a,T)->reason|null, odds(a,T)->{p,f}|null, run(a,T,ok,od)->text, info?] */
+const AX={
+ improve:['diplomacy','other','Improve relations',()=>({pp:15}),(a,T)=>notWar(a,T),null,(a,T)=>{ const g=Math.max(2,Math.round(8+rnd()*6+ideoAff(a,T)/10-grudge(T,a)/10)); addRel(a,T,g); return `Envoys from ${nm(a)} court ${nm(T)} with dinners and trade fairs. Relations +${g} → ${rel(a,T)}.`; }],
+ alliance:['diplomacy','other','Propose alliance',()=>({pp:40}),(a,T)=>notWar(a,T)||(hasT('alliance',a,T)?'Already allied.':null)||(masterOf(T)&&masterOf(T)!==a?`${nm(T)} answers to ${nm(masterOf(T))}.`:null),
+   (a,T)=>{ const se=enemiesOf(a).some(e=>enemiesOf(T).includes(e))||NAT.some(x=>alive(x)&&rel(a,x)<-40&&rel(T,x)<-40); const el=enemiesOf(a).some(e=>hasT('alliance',T,e));
+     return accept(a,T,-0.35,[['common enemy',se?0.3:0],['allied to your enemy',el?-0.6:0],['you are at war and would drag them in',enemiesOf(a).length&&!se?-0.2:0],['your military weight',clamp((eff(a)-eff(T))/(eff(T)+5)*0.05,-0.1,0.15)],['same faction',factionOf(a)&&factionOf(a)===factionOf(T)?0.3:0]]); },
+   (a,T,ok,od)=>{ if(!ok){ addRel(a,T,2); return refuse(a,T,'offer of alliance',od); } addT('alliance',a,T); addRel(a,T,10); S.tension+=2; return `${accepted(T,od)} ${nm(a)} and ${nm(T)} sign a military alliance — an attack on one is an attack on both.`; }],
+ nap:['diplomacy','other','Non-aggression pact',()=>({pp:20}),(a,T)=>notWar(a,T)||(hasT('non_aggression',a,T)?'A pact already exists.':null),
+   (a,T)=>accept(a,T,0.05,[['they fear your army',eff(a)>1.5*eff(T)?0.25:0],['shared border',neighbours(a).includes(T)?0.05:0],['they are busy elsewhere',enemiesOf(T).length?0.15:0]]),
+   (a,T,ok,od)=>{ if(!ok){ addRel(a,T,1); return refuse(a,T,'non-aggression pact',od); } addT('non_aggression',a,T); addRel(a,T,8); return `${accepted(T,od)} ${nm(a)} and ${nm(T)} sign a ten-year non-aggression pact. Few believe it will last ten years.`; }],
+ trade:['economy','other','Trade deal',()=>({pp:10}),(a,T)=>notWar(a,T)||(hasT('trade',a,T)?'Already trading.':null)||(hasT('embargo',a,T)||hasT('embargo',T,a)?'An embargo is in force.':null),
+   (a,T)=>accept(a,T,0.35,[['raw materials for their industry',S.nat[a].ind>S.nat[T].ind?0.1:0.05]]),
+   (a,T,ok,od)=>{ if(!ok) return refuse(a,T,'trade deal',od); addT('trade',a,T); const g=Math.round(5+S.nat[T].ind*0.4); S.nat[a].gold+=g; S.nat[T].gold+=g/2; addRel(a,T,6); return `${accepted(T,od)} Freighters of coal, ore and grain sail between ${nm(a)} and ${nm(T)}: +${g} gold now and +1 gold/month while it lasts.`; }],
+ guarantee:['diplomacy','other','Guarantee independence',()=>({pp:25}),(a,T)=>notWar(a,T)||(hasT('guarantee',a,T)?'Already guaranteed.':null)||(MAJOR(T)?'Great powers do not need guarantees.':null)||(!MAJOR(a)&&eff(a)<eff(T)?'Too weak to guarantee anyone.':null),null,
+   (a,T)=>{ addT('guarantee',a,T); addRel(a,T,15); const foes=NAT.filter(x=>alive(x)&&x!==a&&(S.claims[x]||[]).some(r=>S.owner[r]===T)); foes.forEach(x=>addRel(a,x,-12)); return `${nm(a)} guarantees the independence of ${nm(T)}: attack them and you fight ${nm(a)}.${foes.length?` ${foes.map(nm).join(', ')} call it a provocation.`:''}`; }],
+ access:['diplomacy','other','Request military access',()=>({pp:15}),(a,T)=>notWar(a,T)||(hasT('access',a,T)?'Access already granted.':null),
+   (a,T)=>accept(a,T,-0.15,[['allies',hasT('alliance',a,T)?0.55:0],['they fear you',eff(a)>3*eff(T)?0.2:0],['it would anger their friends',enemiesOf(a).some(e=>rel(T,e)>30)?-0.25:0]]),
+   (a,T,ok,od)=>{ if(!ok) return refuse(a,T,'request for military access',od); addT('access',a,T); return `${accepted(T,od)} ${nm(a)}'s troops may now march through ${nm(T)} to reach their enemies.`; }],
+ faction_form:['diplomacy','self','Form a faction',()=>({pp:50}),(a)=>factionOf(a)?`Already in ${factionOf(a).name}.`:(!MAJOR(a)&&S.nat[a].ind<8?'Only a great power (or industry 8+) can lead a faction.':null),null,
+   (a)=>{ const base={fascist:'Iron Pact',communist:'Comintern',democratic:'Entente',authoritarian:'Concord'}[IDEO(a)]; const name=S.factions.some(f=>f.name===base)?`${nm(a)} ${base}`:base; S.factions.push({name,leader:a,members:[a]}); S.nat[a].stab+=3; S.tension+=2; log('diplo',`${nm(a)} founds the ${name}.`); news(`${nm(a)} founds the ${name}`); return `${nm(a)} founds the ${name}. Invite like-minded nations from their Diplomacy tab.`; }],
+ faction_invite:['diplomacy','other','Invite to faction',()=>({pp:30}),(a,T)=>!factionLed(a)?'Lead a faction first (your own country → Diplomacy → Form a faction).':(factionOf(T)?`Already in ${factionOf(T).name}.`:notWar(a,T)),
+   (a,T)=>accept(a,T,-0.25,[['same ideology',IDEO(a)===IDEO(T)?0.3:-0.15],['protection from a strong leader',eff(a)>2*eff(T)?0.15:0],['threatened by your enemies',enemiesOf(a).some(e=>(S.claims[e]||[]).some(r=>S.owner[r]===T))?0.25:0]]),
+   (a,T,ok,od)=>{ const f=factionLed(a); if(!ok) return refuse(a,T,`invitation to the ${f.name}`,od); f.members.forEach(m=>{ addT('alliance',m,T); addRel(m,T,8); }); f.members.push(T); S.tension+=2; news(`${nm(T)} joins the ${f.name}`); return `${accepted(T,od)} ${nm(T)} joins the ${f.name} — now allied with ${f.members.filter(x=>x!==T).map(nm).join(', ')}.`; }],
+ summit:['diplomacy','other','Hold a summit',()=>({pp:30,gold:20}),(a,T)=>notWar(a,T),
+   (a,T)=>accept(a,T,0.0,[['the summit mood',0.15],['already have a pact',hasT('non_aggression',a,T)?-1:0]]),
+   (a,T,ok,od)=>{ const g=Math.round(14+rnd()*8); addRel(a,T,g); S.nat[a].stab+=2; let t=`Leaders of ${nm(a)} and ${nm(T)} meet under flashbulbs. Relations +${g}, stability +2.`; if(ok&&!hasT('non_aggression',a,T)){ addT('non_aggression',a,T); t+=' They emerge with a non-aggression pact.'; } else t+=` No pact (${pct(od.p)} chance).`; return t; },'Odds shown are for a pact; relations improve either way.'],
+ mediate:['diplomacy','other','Mediate peace',()=>({pp:25}),(a,T)=>atWar(a,T)?'You are a belligerent, not a mediator.':(!enemiesOf(T).filter(x=>x!==a).length?`${nm(T)} is not at war.`:null),
+   (a,T)=>{ const w=S.wars.find(w=>w.a===T||w.b===T); return accept(a,T,-0.25,[['war weariness',Math.min(0.4,(w?w.m:0)/30)],['your prestige',MAJOR(a)?0.15:0],['they are winning',S.fronts.some(f=>f.a===T&&f.prog>50)?-0.2:0]]); },
+   (a,T,ok,od)=>{ const X=enemiesOf(T).filter(x=>x!==a)[0]; if(!ok){ return refuse(a,T,`mediation with ${nm(X)}`,od); } makePeace(T,X,`mediated by ${nm(a)}`); addRel(a,T,12); addRel(a,X,12); S.tension-=4; S.nat[a].pp+=10; return `${accepted(T,od)} Under ${nm(a)}'s chairmanship ${nm(T)} and ${nm(X)} sign an armistice. Prestige +10 PP.`; }],
+ join_war:['military','other','Join their war',()=>({pp:10}),(a,T)=>atWar(a,T)?'You are fighting them.':(!enemiesOf(T).filter(x=>x!==a&&!atWar(a,x)&&!hasT('alliance',a,x)).length?`${nm(T)} has no war you can join.`:null),null,
+   (a,T)=>{ const X=enemiesOf(T).filter(x=>x!==a&&!atWar(a,x)&&!hasT('alliance',a,x))[0]; declareWar(a,X,`joining ${nm(T)}'s war`); addRel(a,T,20); if(a===S.player) openFront(a,X); return `${nm(a)} enters the war against ${nm(X)} at ${nm(T)}'s side. Relations with ${nm(T)} +20.`; }],
+ peace:['diplomacy','other','Offer peace',()=>({pp:10}),(a,T)=>!atWar(a,T)?`Not at war with ${nm(T)}.`:null,
+   (a,T)=>{ const s=warScore(a,T); return {p:clamp(0.15+s/100,0.03,0.95),f:[['war score '+Math.round(s),s/100],['base',0.15]]}; },
+   (a,T,ok,od)=>{ if(!ok){ addRel(a,T,3); return `${nm(T)} rejects peace — they believe they can win (${pct(od.p)} chance).`; } makePeace(a,T,'negotiated'); return `White flags over the trenches: ${nm(T)} accepts an armistice. Each side keeps what it holds.`; }],
+ reparations:['diplomacy','other','Demand reparations',()=>({pp:20}),(a,T)=>!atWar(a,T)?'Only from a beaten enemy.':(warScore(a,T)<25?`War score ${Math.round(warScore(a,T))}; you need 25+.`:null),
+   (a,T)=>{ const s=warScore(a,T); return {p:clamp(s/90,0.05,0.9),f:[['war score '+Math.round(s),s/90]]}; },
+   (a,T,ok,od)=>{ if(!ok) return `${nm(T)} would rather fight on than pay (${pct(od.p)} chance).`; const g=Math.round(Math.min(Math.max(0,S.nat[T].gold),40)+S.nat[T].ind*3); makePeace(a,T,'with reparations'); S.nat[a].gold+=g; S.nat[T].gold-=g; S.nat[T].ind=Math.max(0.5,S.nat[T].ind-1); addRel(a,T,-15); return `${nm(T)} signs a humiliating peace and pays ${g} gold in reparations (−1 industry for them).`; }],
+ demand:['diplomacy','other','Demand territory',()=>({pp:30}),(a,T)=>atWar(a,T)?'At war — take it by force.':(!borderRegs(a,T,false).length?`${nm(T)} has no territory bordering yours.`:null),
+   (a,T)=>{ const cand=borderRegs(a,T,false); const r=(S.claims[a]||[]).find(x=>S.owner[x]===T&&cand.includes(x))||cand[0]; const ratio=demandRatio(a,T), cl=(S.claims[a]||[]).includes(r);
+     return {p:clamp((ratio-1.6)*0.35+(cl?0.15:0),0.02,0.85),f:[[`your strength vs their coalition ${ratio.toFixed(1)}:1`,(ratio-1.6)*0.35],[cl?`legitimate claim on ${REG[r].name}`:`no claim on ${REG[r].name}`,cl?0.15:0]],r}; },
+   (a,T,ok,od)=>{ const r=od.r; if(!ok){ addRel(a,T,-20); S.tension+=3; return `${nm(T)} rejects the ultimatum over ${REG[r].name} (${pct(od.p)} chance; ${reasons(od)||'they think you are bluffing'}). Relations −20.`; }
+     transfer(r,a,'ceded under ultimatum'); addRel(a,T,-30); S.tension+=5; ['UK','FRA','SOV','USA'].filter(x=>x!==a&&x!==T&&alive(x)).forEach(x=>addRel(a,x,-6)); return `${nm(T)} buckles and cedes ${REG[r].name}. The great powers watch with alarm.`; }],
+ concessions:['diplomacy','other','Colonial concessions',()=>({pp:30}),(a,T)=>atWar(a,T)?'At war.':(!colonyOf(T).length?`${nm(T)} has no overseas colonies.`:(!MAJOR(a)?'Only a great power can extract concessions.':null)),
+   (a,T)=>{ const ratio=demandRatio(a,T); return {p:clamp((ratio-1.3)*0.3+0.05,0.02,0.8),f:[[`your strength vs theirs ${ratio.toFixed(1)}:1`,(ratio-1.3)*0.3],['far-flung colony',0.05]],r:colonyOf(T).sort((x,y)=>(S.claims[a]||[]).includes(y)-(S.claims[a]||[]).includes(x))[0]}; },
+   (a,T,ok,od)=>{ if(!ok){ addRel(a,T,-15); return `${nm(T)} refuses to hand over ${REG[od.r].name} (${pct(od.p)} chance). Relations −15.`; } transfer(od.r,a,'colonial concession'); addRel(a,T,-25); S.tension+=3; return `${nm(T)} hands ${REG[od.r].name} to ${nm(a)} as a colonial concession.`; }],
+ puppet:['diplomacy','other','Make puppet',()=>({pp:50}),(a,T)=>MAJOR(T)?'Great powers cannot be puppeted this way.':(masterOf(T)?`${nm(T)} already answers to ${nm(masterOf(T))}.`:(atWar(a,T)?(warScore(a,T)<40?`War score ${Math.round(warScore(a,T))}; need 40+.`:null):(eff(a)<4*eff(T)?'You need 4× their strength (or win a war).':null))),
+   (a,T)=>atWar(a,T)?{p:clamp(warScore(a,T)/100,0.1,0.9),f:[['war score '+Math.round(warScore(a,T)),warScore(a,T)/100]]}:accept(a,T,-0.3,[['overwhelming power',0.25],['protection',enemiesOf(T).length?0.15:0]]),
+   (a,T,ok,od)=>{ if(!ok){ addRel(a,T,-15); return refuse(a,T,'protectorate terms',od); } if(atWar(a,T)) makePeace(a,T,'as a protectorate'); addT('puppet',a,T); addT('alliance',a,T); S.ideo[T]=IDEO(a); S.tension+=3; return `${nm(T)} becomes a protectorate of ${nm(a)}: its army follows ${nm(a)}'s wars and its regime now mirrors ${nm(a)}'s.`; }],
+ annex:['diplomacy','other','Annex puppet',()=>({pp:60}),(a,T)=>!isPuppet(a,T)?`${nm(T)} is not your puppet.`:(S.turn-(S.treaties.find(t=>t.type==='puppet'&&t.a===a&&t.b===T).t||0)<6?'A puppet must be held 6 months before annexation.':null),null,
+   (a,T)=>{ const rs=regionsOf(T); rs.forEach(r=>{ S.owner[r]=a; S.flash.push(r); S.occ[r]={t:S.turn,res:20}; }); S.nat[a].army+=S.nat[T].army*0.5; S.nat[a].ind+=S.nat[T].ind*0.5; S.nat[T].alive=false; S.treaties=S.treaties.filter(t=>t.a!==T&&t.b!==T); ['UK','FRA','USA','SOV'].filter(x=>x!==a&&alive(x)).forEach(x=>addRel(a,x,-10)); S.tension+=4; log('border',`${nm(a)} annexes ${nm(T)}.`); news(`${nm(a).toUpperCase()} ANNEXES ${nm(T).toUpperCase()}`); return `${nm(T)} is annexed into ${nm(a)}: ${rs.length} region${rs.length>1?'s':''} gained (occupied — expect resistance).`; }],
+ recall:['diplomacy','other','Recall ambassador',()=>({}),(a,T)=>null,null,(a,T)=>{ addRel(a,T,-12); S.nat[a].pp+=5; S.nat[a].stab+=1; return `${nm(a)} recalls its ambassador from ${nm(T)}. Relations −12; hard-liners at home approve (+5 PP).`; }],
+ denounce:['diplomacy','other','Denounce',()=>({}),(a,T)=>null,null,(a,T)=>{ addRel(a,T,-18); S.nat[a].pp+=8; S.nat[a].stab+=3; alliesOf(T).forEach(x=>addRel(a,x,-4)); return `${nm(a)} denounces ${nm(T)} on the wireless. Crowds cheer (+3 stability, +8 PP); relations crash to ${rel(a,T)}.`; }],
+ break:['diplomacy','other','Break treaties',()=>({pp:10}),(a,T)=>!pactsBetween(a,T).some(t=>BINDING.includes(t.type))?`No treaties with ${nm(T)}.`:null,null,
+   (a,T)=>{ const ps=breakPacts(a,T); return `${nm(a)} tears up its ${ps.map(t=>TNAME[t.type]||t.type).join(', ')} with ${nm(T)}. ${nm(T)} will remember this betrayal for years, and third parties will trust ${nm(a)} less.`; },'Betrayal: −40 relations, −8 with great powers & neighbours, remembered ~5 years.'],
+ // ---- intrigue
+ spy:['intrigue','other','Spy',()=>({gold:15}),(a,T)=>null,(a,T)=>({p:clamp(0.6+(S.nat[a].ind-S.nat[T].ind)/100,0.3,0.85),f:[['base',0.6],['spy-service budgets',(S.nat[a].ind-S.nat[T].ind)/100]]}),
+   (a,T,ok,od)=>{ const n=S.nat[T]; let t=`Intel on ${nm(T)}: ${n.army.toFixed(0)} inf, ${n.arm.toFixed(1)} armour, ${n.art.toFixed(1)} artillery, ${n.air.toFixed(1)} air, ${n.nav.toFixed(1)} fleets, industry ${n.ind.toFixed(1)}, stability ${Math.round(n.stab)}.`; if(ok){ n.ind=Math.max(0.5,n.ind-0.4); t=`Saboteurs blow a rail junction (−0.4 industry). `+t; } if(rnd()<0.25){ addRel(a,T,-20); t+=' One agent is caught and talks: relations −20.'; } return t; }],
+ propaganda:['intrigue','other','Propaganda broadcasts',()=>({gold:10,pp:5}),(a,T)=>null,null,(a,T)=>{ S.nat[T].stab=clamp(S.nat[T].stab-6,0,100); addRel(a,T,-5); return `${nm(a)}'s radio towers beam into ${nm(T)}: −6 stability there.`; }],
+ fund_rebels:['intrigue','other','Fund rebels',()=>({gold:30}),(a,T)=>null,(a,T)=>({p:clamp(0.4+(60-S.nat[T].stab)/100,0.15,0.85),f:[['base',0.4],[`their stability ${Math.round(S.nat[T].stab)}`,(60-S.nat[T].stab)/100]]}),
+   (a,T,ok,od)=>{ let t; if(ok){ S.nat[T].stab=clamp(S.nat[T].stab-10,0,100); S.nat[T].army=Math.max(0.5,S.nat[T].army-1); t=`Smuggled rifles reach rebels in ${nm(T)}: −10 stability, −1 division tied down.`; } else t=`The rebels squander the money (${pct(od.p)} chance).`; if(rnd()<0.25){ addRel(a,T,-25); t+=` ${nm(T)} uncovers the plot: relations −25.`; } return t; }],
+ coup:['intrigue','other','Support coup',()=>({gold:60,pp:40}),(a,T)=>S.nat[T].stab>=45?`Their regime is too stable (stability ${Math.round(S.nat[T].stab)}; needs below 45).`:(IDEO(T)===IDEO(a)?'They already share your ideology.':null),
+   (a,T)=>({p:clamp((45-S.nat[T].stab)/45+0.1-(MAJOR(T)?0.25:0),0.05,0.8),f:[[`their instability`,(45-S.nat[T].stab)/45],['base',0.1],['great power security services',MAJOR(T)?-0.25:0]]}),
+   (a,T,ok,od)=>{ if(!ok){ addRel(a,T,-40); S.tension+=3; return `The coup in ${nm(T)} collapses; the plotters are shot and ${nm(a)}'s hand is exposed (relations −40).`; } S.ideo[T]=IDEO(a); S.rel[rk(a,T)]=Math.max(rel(a,T),50); S.nat[T].stab=40; S.treaties=S.treaties.filter(t=>!((t.a===T||t.b===T)&&t.type==='alliance'&&enemiesOf(a).includes(t.a===T?t.b:t.a))); log('event',`A ${IDEO(a)} coup topples the government of ${nm(T)}.`); news(`COUP IN ${nm(T).toUpperCase()}`); return `Tanks surround the palace: a ${IDEO(a)} junta seizes ${nm(T)}. Relations now ${rel(a,T)}.`; }],
+ aid:['intrigue','other','Send aid',()=>({gold:25}),(a,T)=>notWar(a,T),null,(a,T)=>{ S.nat[T].army+=1.5; S.nat[T].gold+=10; addRel(a,T,12); enemiesOf(T).forEach(x=>addRel(a,x,-8)); return `${nm(a)} ships rifles, trucks and grain to ${nm(T)}: +1.5 divisions for them, relations +12.`; }],
+ arms_sell:['economy','other','Sell arms',()=>({}),(a,T)=>notWar(a,T)||(S.nat[a].army<6?'Your own army is too small to spare weapons.':null)||(S.nat[T].gold<30?`${nm(T)} cannot pay (needs 30 gold).`:null),
+   (a,T)=>accept(a,T,0.3,[['they need weapons',enemiesOf(T).length?0.3:0]]),
+   (a,T,ok,od)=>{ if(!ok) return refuse(a,T,'arms offer',od); S.nat[a].army-=1.5; S.nat[a].gold+=30; S.nat[T].gold-=30; S.nat[T].army+=1.5; addRel(a,T,6); return `${accepted(T,od)} Crated rifles and field guns go to ${nm(T)}: +30 gold, −1.5 of your divisions' kit.`; }],
+ arms_buy:['economy','other','Buy arms',()=>({gold:35}),(a,T)=>notWar(a,T)||(S.nat[T].ind<6?`${nm(T)}'s arms industry is too small.`:null)||(hasT('embargo',T,a)?`${nm(T)} embargoes you.`:null),
+   (a,T)=>accept(a,T,0.3,[['spare factory capacity',S.nat[T].ind>15?0.15:0],['they are at war themselves',enemiesOf(T).length?-0.25:0]]),
+   (a,T,ok,od)=>{ if(!ok){ S.nat[a].gold+=35; return refuse(a,T,'purchase order',od)+' Gold refunded.'; } S.nat[a].army+=1.4; S.nat[a].arm+=0.4; S.nat[T].gold+=35; addRel(a,T,5); return `${accepted(T,od)} ${nm(T)} delivers rifles and a battalion of tanks: +1.4 infantry, +0.4 armour.`; }],
+ embargo:['economy','other','Embargo',()=>({pp:10}),(a,T)=>hasT('embargo',a,T)?'Embargo already in force.':null,null,
+   (a,T)=>{ const hadTrade=hasT('trade',a,T); if(hadTrade){ S.treaties=S.treaties.filter(t=>!(t.type==='trade'&&((t.a===a&&t.b===T)||(t.a===T&&t.b===a)))); betray(a,T,'trade'); } addT('embargo',a,T); S.nat[T].ind=Math.max(0.5,S.nat[T].ind-0.6); S.nat[T].stab-=3; addRel(a,T,-15); return `${nm(a)} closes its ports to ${nm(T)}: −0.6 industry, −3 stability for them${hadTrade?' (their trade deal is broken — remembered as a betrayal)':''}.`; }],
+ // ---- economy (self)
+ build_industry:['economy','self','Build factories',()=>({gold:40}),()=>null,null,(a)=>{ S.nat[a].ind+=1.2; return `Smokestacks rise: +1.2 industry.`; }],
+ war_economy:['economy','self','War economy',()=>({pp:25}),(a)=>S.nat[a].wareco?'Already on a war footing.':null,null,(a)=>{ const n=S.nat[a]; n.wareco=true; n.bud=Math.max(n.bud,0.55); n.stab-=5; return `${nm(a)} converts to a war economy: military budget ${Math.round(n.bud*100)}%, unit output ×1.35, factory growth slowed, −5 stability.`; }],
+ civil_economy:['economy','self','Civilian economy',()=>({pp:15}),(a)=>!S.nat[a].wareco?'Not on a war footing.':null,null,(a)=>{ const n=S.nat[a]; n.wareco=false; n.bud=Math.min(n.bud,0.3); n.stab+=4; return `Factories return to consumer goods: budget ${Math.round(n.bud*100)}% military, +4 stability.`; }],
+ tax:['economy','self','Raise taxes',()=>({pp:10}),(a)=>S.nat[a].stab<20?'Stability too low to squeeze more.':null,null,(a)=>{ const n=S.nat[a], g=Math.round(25+n.ind*1.2); n.gold+=g; n.stab-=6; return `New taxes on tobacco, wireless sets and beer: +${g} gold, −6 stability.`; }],
+ ration:['economy','self','Rationing',()=>({pp:15}),(a)=>S.nat[a].stab<25?'Stability too low for rationing.':null,null,(a)=>{ const n=S.nat[a], m=Math.round(12+regionsOf(a).length*0.5); n.mp+=m; n.gold+=10; n.stab-=4; return `Ration books are issued: +${m} manpower freed, +10 gold, −4 stability.`; }],
+ budget_army:['economy','self','Budget → army',()=>({}),(a)=>S.nat[a].bud>=0.7?'Already at 70% military.':null,null,(a)=>{ S.nat[a].bud=Math.min(0.7,S.nat[a].bud+0.1); return `Budget: ${Math.round(S.nat[a].bud*100)}% military.`; },null,1],
+ budget_civ:['economy','self','Budget → factories',()=>({}),(a)=>S.nat[a].bud<=0.1?'Already at 10% military.':null,null,(a)=>{ S.nat[a].bud=Math.max(0.1,S.nat[a].bud-0.1); return `Budget: ${Math.round(S.nat[a].bud*100)}% military.`; },null,1],
+ propaganda_home:['economy','self','Home propaganda',()=>({gold:10}),()=>null,null,(a)=>{ S.nat[a].stab=clamp(S.nat[a].stab+7,0,100); S.nat[a].pp+=5; return `Posters, parades and a stirring speech: +7 stability, +5 PP.`; }],
+ // ---- military
+ mobilize:['military','self','Mobilize',()=>({pp:10}),(a)=>S.nat[a].mp<15?`Manpower ${Math.floor(S.nat[a].mp)}; need 15.`:null,null,(a)=>{ const n=S.nat[a], add=Math.min(n.mp/6,n.army*0.25+3); n.army+=add; n.mp-=add*6; n.stab-=8; n.bud=Math.max(n.bud,0.5); S.tension+=3; return `Mobilization: +${add.toFixed(1)} infantry divisions, budget ${Math.round(n.bud*100)}% military, −8 stability. Neighbours are alarmed.`; }],
+ demobilize:['military','self','Demobilize',()=>({}),(a)=>S.nat[a].army<6?'Army already minimal.':(enemiesOf(a).length?'Not while at war.':null),null,(a)=>{ const n=S.nat[a], d=n.army*0.25; n.army-=d; n.mp+=d*5; n.gold+=d*2; n.stab+=5; S.tension-=1; return `${d.toFixed(1)} divisions go home to the farms: +${Math.round(d*5)} manpower, +${Math.round(d*2)} gold, +5 stability.`; }],
+ build_inf:['military','self','Build infantry',()=>({gold:20,mp:10}),()=>null,null,(a)=>{ S.nat[a].army+=2; return `+2 infantry divisions drill on muddy fields.`; }],
+ build_arm:['military','self','Build armour',()=>({gold:45,mp:6}),(a)=>S.nat[a].ind<8?'Needs industry 8+.':null,null,(a)=>{ S.nat[a].arm+=1; return `+1 armoured division rolls off the line (2.8× an infantry division in attack).`; }],
+ build_art:['military','self','Build artillery',()=>({gold:25,mp:5}),(a)=>S.nat[a].ind<4?'Needs industry 4+.':null,null,(a)=>{ S.nat[a].art+=1; return `+1 artillery division (strong in defence and sieges).`; }],
+ build_air:['military','self','Build air wing',()=>({gold:35,mp:2}),(a)=>S.nat[a].ind<6?'Needs industry 6+.':null,null,(a)=>{ S.nat[a].air+=1; return `+1 air wing: air superiority boosts every front.`; }],
+ build_nav:['military','self','Build fleet',()=>({gold:50,mp:3}),(a)=>!coastal(a)?'You have no coastline.':(S.nat[a].ind<6?'Needs industry 6+.':null),null,(a)=>{ S.nat[a].nav+=1; return `+1 fleet: supplies overseas fronts and enables blockades.`; }],
+ fortify:['military','both','Fortify border',()=>({gold:25}),(a,T)=>null,null,(a,T)=>{ let r=null; if(T&&T!==a) r=regionsOf(a).filter(x=>[...LANDADJ[x]].some(y=>S.owner[y]===T)).sort((x,y)=>(S.fort[x]||0)-(S.fort[y]||0))[0]; if(!r){ const th=regionsOf(a).filter(x=>[...LANDADJ[x]].some(y=>S.owner[y]!==a&&(atWar(a,S.owner[y])||rel(a,S.owner[y])<0))); r=th.sort((x,y)=>(S.fort[x]||0)-(S.fort[y]||0))[0]||capOf(a); }
+   if((S.fort[r]||0)>=5){ S.nat[a].gold+=25; return `${REG[r].name} is already fortified to the maximum (refunded).`; } S.fort[r]=(S.fort[r]||0)+1; return `Concrete pours at ${REG[r].name}: fort level ${S.fort[r]} (+20% defence each).`; }],
+ garrison:['military','self','Pacify occupied lands',()=>({gold:15,pp:5}),(a)=>!Object.keys(S.occ).some(r=>S.owner[r]===a)?'You occupy no foreign regions.':null,null,(a)=>{ const rs=Object.keys(S.occ).filter(r=>S.owner[r]===a); rs.forEach(r=>S.occ[r].res=Math.max(0,S.occ[r].res-25)); S.nat[a].stab-=1; return `Garrisons and curfews in ${rs.length} occupied region${rs.length>1?'s':''}: resistance −25 each.`; }],
+ attack:['military','other','Attack',(a,T)=>({pp:atWar(a,T)?0:((S.claims[a]||[]).some(r=>S.owner[r]===T)?10:25)}),(a,T)=>hasT('alliance',a,T)?`${nm(T)} is your ally — break the alliance first.`:null,
+   (a,T)=>{ const r=pickTarget(a,T); if(!r) return {p:0,f:[['no border, sea lane or military access',-1]],r:null}; const c=frontCalc({a,d:T,r}); return {p:clamp((c.ratio-0.6)/1.4,0.02,0.95),f:[[`strength ratio ${c.ratio.toFixed(2)}:1`,0],[`terrain ${c.terr}`,0],[`forts ${c.fort}`,0],[`supply ${Math.round(c.supply*100)}%${c.oos?' (OUT OF SUPPLY)':''}`,0],[`air ${c.airA.toFixed(0)} vs ${c.airD.toFixed(0)}`,0]],r,c}; },
+   (a,T,ok,od)=>{ let t=''; const pacts=pactsBetween(a,T).filter(x=>BINDING.includes(x.type)); if(!atWar(a,T)){ declareWar(a,T,'direct order'); t=`${nm(a)} declares war on ${nm(T)}${pacts.length?` — breaking their ${pacts.map(x=>TNAME[x.type]).join(', ')}`:''}. `; }
+     if(!od.r) return t+`But no front can be opened: no border, sea lane or military access to ${nm(T)}.`; const f=openFront(a,T,od.r), c=frontCalc(f); return t+`Offensive into ${REG[f.r].name} (${c.terr}${c.fort?`, forts ${c.fort}`:''}): ratio ${c.ratio.toFixed(2)}:1, supply ${Math.round(c.supply*100)}%. ${c.ratio<0.8?'The generals expect it to fail.':c.ratio<1.3?'Expect a grinding, multi-month fight.':'The enemy line looks brittle.'}`; },'The % is the front\'s chance to make progress each month; a region falls at 100% progress.'],
+ blockade:['military','other','Naval blockade',()=>({gold:20}),(a,T)=>S.nat[a].nav<2?`Need 2+ fleets (you have ${S.nat[a].nav.toFixed(1)}).`:(!coastal(T)?`${nm(T)} is landlocked.`:(hasT('alliance',a,T)?'They are your ally.':null)),
+   (a,T)=>({p:clamp(0.5+(S.nat[a].nav-S.nat[T].nav)/(S.nat[a].nav+S.nat[T].nav+1)*0.5,0.1,0.95),f:[[`fleets ${S.nat[a].nav.toFixed(0)} vs ${S.nat[T].nav.toFixed(0)}`,0]]}),
+   (a,T,ok,od)=>{ let t=''; if(!atWar(a,T)){ addRel(a,T,-25); S.tension+=3; t='An act of aggression in peacetime: relations −25. '; } if(!ok){ S.nat[a].nav=Math.max(0,S.nat[a].nav-0.5); return t+`${nm(T)}'s fleet breaks the blockade; you lose half a fleet.`; } S.nat[T].ind=Math.max(0.5,S.nat[T].ind-0.6); S.nat[T].gold-=15; S.nat[T].stab-=3; return t+`The blockade holds: ${nm(T)} loses 0.6 industry, 15 gold and 3 stability.`; }],
+ air_raid:['military','other','Air raid',()=>({gold:20}),(a,T)=>!atWar(a,T)?'Only in wartime.':(S.nat[a].air<1?'You have no air wings.':null),
+   (a,T)=>({p:clamp(0.5+(S.nat[a].air-S.nat[T].air)/(S.nat[a].air+S.nat[T].air+1)*0.45,0.1,0.92),f:[[`air ${S.nat[a].air.toFixed(0)} vs ${S.nat[T].air.toFixed(0)}`,0]]}),
+   (a,T,ok,od)=>{ if(!ok){ S.nat[a].air=Math.max(0,S.nat[a].air-0.5); return `Fighters tear the bomber stream apart: −0.5 air wing.`; } S.nat[T].ind=Math.max(0.5,S.nat[T].ind-0.5); S.nat[T].stab-=2; S.fronts.filter(f=>f.a===a&&f.d===T).forEach(f=>f.prog=Math.min(99,f.prog+10)); return `Bombers hit ${nm(T)}'s rail yards: −0.5 industry, fronts against them +10%.`; }],
+ reinforce:['military','other','Reinforce front',()=>({gold:15,mp:10}),(a,T)=>!S.fronts.some(f=>f.a===a&&f.d===T)?`No offensive against ${nm(T)} to reinforce.`:null,null,
+   (a,T)=>{ const f=S.fronts.find(f=>f.a===a&&f.d===T); S.nat[a].army+=1; f.prog=Math.min(99,f.prog+12); return `Fresh reserves and shells reach the ${REG[f.r].name} front: +1 division, +12% progress.`; }],
+ advisor:['diplomacy','both','Ask advisor',()=>({}),()=>null,null,(a,T)=>advisorText(T),null,1],
+};
+const AXI=k=>({tab:AX[k][0],scope:AX[k][1],label:AX[k][2],cost:AX[k][3],pre:AX[k][4],odds:AX[k][5],run:AX[k][6],note:AX[k][7],noTime:AX[k][8]});
+const costStr=c=>[c.gold?`${c.gold}💰`:'',c.pp?`${c.pp} PP`:'',c.mp?`${c.mp} MP`:''].filter(Boolean).join(' · ')||'free';
+function costOf(k,a,T){ return AXI(k).cost(a,T)||{}; }
+function lackOf(a,c){ const n=S.nat[a]; if(c.gold&&n.gold<c.gold) return `Needs ${c.gold} gold (have ${Math.floor(n.gold)}).`; if(c.pp&&n.pp<c.pp) return `Needs ${c.pp} political power (have ${Math.floor(n.pp)}).`; if(c.mp&&n.mp<c.mp) return `Needs ${c.mp} manpower (have ${Math.floor(n.mp)}).`; return null; }
+function checkAction(k,a,T){ const A=AXI(k); if(T&&!alive(T)) return {why:`${nm(T)} no longer exists.`}; if(A.scope==='other'&&(!T||T===a)) return {why:'Needs a foreign target.'}; if(A.scope==='self'&&T&&T!==a) return {why:'Only on your own country.'};
+  const why=A.pre(a,T)||lackOf(a,costOf(k,a,T)); if(why) return {why}; return {why:null,od:A.odds?A.odds(a,T):null}; }
+function doAction(k,a,T){ const A=AXI(k); const chk=checkAction(k,a,T); if(chk.why) return {ok:false,narr:chk.why};
+  const c=costOf(k,a,T), n=S.nat[a]; n.gold-=c.gold||0; n.pp-=c.pp||0; n.mp-=c.mp||0;
+  const od=chk.od, success=od&&!A.note?.startsWith('The %')?rnd()<od.p:true; const narr=A.run(a,T,success,od||{p:1,f:[]});
+  return {ok:true,narr,success,od,cost:c,noTime:A.noTime}; }
+/* AI nations use the same actions toward each other */
+const AI_LOG=new Set(['alliance','nap','guarantee','faction_form','faction_invite','break','mediate','coup','embargo','puppet','annex','demand','concessions','join_war','access','denounce','aid']);
+function aiDiploActions(){
+  const actors=NAT.filter(c=>alive(c)&&c!==S.player).sort(()=>rnd()-0.5).slice(0,10);
+  for(const a of actors){ const n=S.nat[a]; if(n.pp<20||rnd()>0.6) continue; const opts=[]; const nb=neighbours(a);
+    const cands=[...new Set(nb.concat(NAT.filter(x=>MAJOR(x))))].filter(x=>x!==a&&x!==S.player&&alive(x));
+    for(const T of cands){ const r=rel(a,T), ia=ideoAff(a,T); if(atWar(a,T)){ if(warScore(a,T)>30) opts.push(['peace',T,0.4]); continue; }
+      if(!hasT('alliance',a,T)&&r>=55&&ia>=0) opts.push(['alliance',T,2]);
+      if(!hasT('non_aggression',a,T)&&nb.includes(T)&&r>-40&&r<40&&enemiesOf(a).length+(YM()>=(WAR_START[a]??9e9)-6?1:0)) opts.push(['nap',T,1.2]);
+      if(!hasT('trade',a,T)&&r>15&&!hasT('embargo',a,T)&&!hasT('embargo',T,a)) opts.push(['trade',T,0.8]);
+      if(ia>=0&&r<55&&r>-15) opts.push(['improve',T,0.6]);
+      if(MAJOR(a)&&IDEO(a)==='democratic'&&!MAJOR(T)&&!hasT('guarantee',a,T)&&S.tension>50&&NAT.some(x=>alive(x)&&IDEO(x)==='fascist'&&(S.claims[x]||[]).some(q=>S.owner[q]===T))) opts.push(['guarantee',T,1.5]);
+      if(factionLed(a)&&!factionOf(T)&&IDEO(T)===IDEO(a)&&r>25) opts.push(['faction_invite',T,1.5]);
+      if(r<-45&&ia<0) opts.push(['denounce',T,0.4]);
+      if(IDEO(a)==='democratic'&&MAJOR(a)&&S.wars.some(w=>w.a===T&&w.motive&&!/honour|joining|following/.test(w.motive))&&!hasT('embargo',a,T)&&S.tension>55) opts.push(['embargo',T,1]);
+      if(enemiesOf(T).length&&r>40) opts.push(['aid',T,1]);
+      if(MAJOR(a)&&enemiesOf(T).length&&!enemiesOf(a).length&&rnd()<0.3) opts.push(['mediate',T,0.3]);
+      if(['fascist','communist'].includes(IDEO(a))&&YM()>=(WAR_START[a]??9e9)&&(S.claims[a]||[]).some(q=>S.owner[q]===T)&&pactsBetween(a,T).some(t=>t.type==='non_aggression')&&eff(a)>1.8*eff(T)) opts.push(['break',T,0.7]);
+      if(IDEO(a)!=='democratic'&&!MAJOR(T)&&S.nat[T].stab<35&&IDEO(T)!==IDEO(a)&&nb.includes(T)) opts.push(['coup',T,0.3]);
+    }
+    if(MAJOR(a)&&!factionOf(a)&&S.tension>35&&NAT.filter(x=>alive(x)&&x!==a&&IDEO(x)===IDEO(a)).length>1) opts.push(['faction_form',a,S.tension>45?2.5:0.8]);
+    if(enemiesOf(a).length&&!n.wareco) opts.push(['war_economy',a,1.5]);
+    const ok=opts.filter(o=>!checkAction(o[0],a,o[0].endsWith('_form')||o[0]==='war_economy'?null:o[1]).why); const ws=ok.reduce((s,o)=>s+o[2],0); if(!ws) continue;
+    let x=rnd()*ws; const o=ok.find(o=>(x-=o[2])<0)||ok[0]; const T=AXI(o[0]).scope==='self'?null:o[1];
+    const res=doAction(o[0],a,T); if(res.ok&&AI_LOG.has(o[0])) log('diplo',res.narr);
   }
-  return fail('Unknown order.');
 }
-const EXAMPLES=['Invade Poland','Ally with Italy','Demand Danzig from Poland','Build factories','Spy on the Soviets','Trade oil with Romania','Fortify the border','Mobilize the army','Guarantee Belgium','Embargo Japan','Make peace with France','Propaganda'];
+/* AI proposals to the player: accept/refuse in a decision card */
+async function aiOffers(){
+  if(rnd()>0.18) return; const p=P(); const c=NAT.filter(x=>alive(x)&&x!==p&&!atWar(x,p)&&(MAJOR(x)||neighbours(p).includes(x))&&rel(x,p)>=35&&S.nat[x].pp>=20).sort(()=>rnd()-0.5)[0]; if(!c) return;
+  const kinds=[['alliance',!hasT('alliance',c,p)&&rel(c,p)>=60&&ideoAff(c,p)>=0],['non_aggression',!hasT('non_aggression',c,p)],['trade',!hasT('trade',c,p)&&!hasT('embargo',c,p)&&!hasT('embargo',p,c)]].filter(k=>k[1]);
+  if(!kinds.length) return; const type=kinds[0][0]; S.nat[c].pp-=15;
+  const i=await askDecision({title:`${nm(c)} proposes ${/^[aeiou]/.test(TNAME[type])?'an':'a'} ${TNAME[type]}`,text:`The ambassador of ${nm(c)} (relations ${rel(c,p)}) offers ${nm(p)} a ${TNAME[type]}. Refusing costs 5 relations. Remember: breaking a treaty later is a betrayal that ${nm(c)} will not forget.`,opts:[{t:'Accept'},{t:'Refuse'}]});
+  if(i===0){ addT(type,c,p); addRel(c,p,8); log('diplo',`${nm(p)} accepts ${nm(c)}'s ${TNAME[type]}.`); } else { addRel(c,p,-5); log('diplo',`${nm(p)} turns down ${nm(c)}'s ${TNAME[type]}.`); }
+}
 
 /* ================= ADVISOR & BRIEFING ================= */
 function threatsTo(p){ return NAT.filter(x=>alive(x)&&x!==p).map(x=>{ const cl=(S.claims[x]||[]).filter(r=>S.owner[r]===p); const b=borders(x,p); const score=(cl.length?40:0)+(b?20:0)-rel(p,x)/3+eff(x)/Math.max(1,eff(p))*10+(atWar(p,x)?60:0); return {x,cl,b,score}; }).filter(t=>t.b||t.cl.length).sort((a,b)=>b.score-a.score); }
@@ -431,153 +483,60 @@ function renderBriefing(){ const p=P(), n=S.nat[p];
   const th=threatsTo(p).slice(0,3).map(t=>`<li>${esc(nm(t.x))} <small>str ${eff(t.x).toFixed(0)} · rel ${rel(p,t.x)}${t.cl.length?' · claims '+t.cl.map(r=>esc(REG[r].name)).join(', '):''}${atWar(p,t.x)?' · <b class="war">AT WAR</b>':''}</small></li>`).join('');
   $('#brief').innerHTML=`<div class="adv">${esc(advisorText())}</div>
    <h4>Economy</h4><div class="econ">Gold <b>${Math.floor(n.gold)}</b> (+${(n.ind*0.9-n.army*0.04).toFixed(1)}/mo) · Industry <b>${n.ind.toFixed(1)}</b> · Manpower <b>${Math.floor(n.mp)}</b> · Army <b>${n.army.toFixed(1)}</b> div · Quality ${n.q.toFixed(2)} · Stability <b>${Math.round(n.stab)}</b></div>
+   <div class="econ">Political power <b>${Math.floor(n.pp)}</b> · Units: ${n.army.toFixed(0)} inf · ${n.arm.toFixed(1)} armour · ${n.art.toFixed(1)} artillery · ${n.air.toFixed(1)} air · ${n.nav.toFixed(1)} fleets${n.wareco?' · <b>WAR ECONOMY</b>':''}</div>
    <label class="bud">Budget: <b id="budv">${Math.round(n.bud*100)}%</b> army / ${Math.round(100-n.bud*100)}% factories<input id="budr" type="range" min="10" max="70" value="${Math.round(n.bud*100)}"></label>
    <h4>Fronts</h4>${fr.length?fr.map(f=>`<div class="front"><span>${f.a===p?'▶ Attacking':'◀ Defending'} ${esc(REG[f.r].name)} <small>${esc(nm(f.a))} vs ${esc(nm(f.d))}${f.last?` · ratio ${f.last.ratio} · ${f.last.delta>=0?'+':''}${f.last.delta}%/mo · losses ${f.last.la}/${f.last.ld} div · ${esc(f.last.terr)}`:''}</small></span><i style="width:${Math.round(f.prog)}%"></i></div>`).join(''):'<small>No active fronts.</small>'}
+   <h4>Diplomacy</h4><div class="econ">${factionOf(p)?`Faction: <b>${esc(factionOf(p).name)}</b> (${factionOf(p).members.map(x=>esc(nm(x))).join(', ')})<br>`:''}Treaties: ${S.treaties.filter(t=>t.a===p||t.b===p).map(t=>`${esc(TNAME[t.type]||t.type)} ${esc(nm(t.a===p?t.b:t.a))}`).join(' · ')||'none'}<br>${(()=>{ const g=NAT.filter(x=>alive(x)&&grudge(x,p)>1); return g.length?`🗡 Remember your betrayals: ${g.map(x=>`${esc(nm(x))} (−${Math.round(grudge(x,p))}% trust)`).join(', ')}`:'No one holds a grudge against you.'; })()}</div>
    <h4>Threats</h4><ul>${th||'<li><small>None nearby.</small></li>'}</ul>
    <h4>War goals (claims)</h4><ul>${goals||'<li><small>No claims. Demand or conquer to expand.</small></li>'}</ul>
    <h4>Coming up</h4><small>${esc(nextEventHint())}</small>`;
   $('#budr').oninput=e=>{ n.bud=e.target.value/100; $('#budv').textContent=e.target.value+'%'; autosave(); };
 }
 
-/* ================= LLM: local (PC) + on-device (WebLLM) ================= */
-function loadCfg(){ const d={enabled:true,kind:'auto',base:'http://127.0.0.1:11434',model:'',timeout:60,temperature:0.4}; try{ return Object.assign(d,JSON.parse(localStorage.getItem(CFG_KEY)||'{}')); }catch(e){ return d; } }
-function saveCfg(){ localStorage.setItem(CFG_KEY,JSON.stringify(CFG)); }
-const HOSTED=location.protocol==='https:'&&!/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname);
-if(HOSTED){ CFG.enabled=false; }
-let PROXY=null, WEBLLM=null, WEBLLM_ID=null;
-async function detectProxy(){ if(location.protocol==='file:'||HOSTED) return PROXY=false; try{ const j=await (await fetch('/api/ping',{cache:'no-store'})).json(); PROXY=!!(j&&j.server==='ww2-ai'); }catch(e){ PROXY=false; } return PROXY; }
-async function xfetch(url,opts={},ms=8000){ const ctl=new AbortController(); const t=setTimeout(()=>ctl.abort(),ms); try{ return await fetch(PROXY?'/llm?url='+encodeURIComponent(url):url,Object.assign({signal:ctl.signal},opts)); } finally{ clearTimeout(t); } }
-async function autodetect(){ let hints=[], hm=[]; if(PROXY){ try{ const h=await (await fetch('/api/hints')).json(); hints=h.candidates||[]; hm=h.models||[]; }catch(e){} }
-  const bases=[...new Set([...hints,'http://127.0.0.1:11434','http://127.0.0.1:1234','http://127.0.0.1:8080','http://127.0.0.1:8000','http://127.0.0.1:5001'])]; const found=[];
-  for(const b of bases){ const root=b.replace(/\/v1\/?$/,'').replace(/\/$/,'');
-    try{ const r=await xfetch(root+'/api/tags',{},2500); if(r.ok){ const j=await r.json(); if(j.models){ found.push({kind:'ollama',base:root,models:j.models.map(m=>m.name)}); continue; } } }catch(e){}
-    try{ const r=await xfetch(root+'/v1/models',{},2500); if(r.ok){ const j=await r.json(); if(j.data) found.push({kind:'openai',base:root+'/v1',models:j.data.map(m=>m.id)}); } }catch(e){} }
-  return {found,hintModels:hm}; }
-function pickModel(models,hints){ const ok=models.filter(m=>!/embed|bge|nomic|minilm/i.test(m)); for(const h of hints||[]){ const f=ok.find(m=>m===h||m.endsWith('/'+h)||h.endsWith(m)); if(f) return f; } return ok[0]||models[0]||''; }
-const INTENT_KEYS=INTENTS.map(i=>i[0]);
-const ISCHEMA={type:'object',required:['intent','target','region','reply'],properties:{intent:{type:'string',enum:[...INTENT_KEYS,'unknown']},target:{type:['string','null']},region:{type:['string','null']},reply:{type:'string'}}};
-function validateIntent(raw){
-  let o=raw; if(typeof raw==='string'){ const t=raw.trim().replace(/^```(?:json)?/i,'').replace(/```$/,''); const i=t.indexOf('{'), j=t.lastIndexOf('}'); if(i<0||j<i) throw new Error('no JSON object'); o=JSON.parse(t.slice(i,j+1)); }
-  if(!o||typeof o!=='object') throw new Error('not an object');
-  const intent=String(o.intent||'').toLowerCase(); if(![...INTENT_KEYS,'unknown'].includes(intent)) throw new Error('bad intent '+intent);
-  let target=o.target?String(o.target).toUpperCase():null; if(target&&!D.N[target]){ const hit=detectTargets(' '+String(o.target).toLowerCase()+' ')[0]; target=hit?hit.n:null; }
-  let region=o.region?String(o.region):null; if(region&&!REG[region]){ const hit=detectTargets(' '+region.toLowerCase()+' ').find(h=>h.r); region=hit?hit.r:null; }
-  return {intent, target:target&&alive(target)?target:null, region, reply:typeof o.reply==='string'?o.reply.slice(0,300):''};
-}
-function intentPrompt(text,popT){ return [{role:'system',content:`You turn a WWII strategy player's typed order into JSON. Player nation: ${P()} (${nm(P())}). Date: ${dateStr()}. Reply ONLY with JSON: {"intent": one of ${JSON.stringify([...INTENT_KEYS,'unknown'])}, "target": nation code like GER,UK,FRA,ITA,SOV,JAP,USA,CHI,POL or null, "region": region name or null, "reply": one short in-character sentence from your minister}. Nation codes: ${NAT.filter(alive).join(',')}.`},{role:'user',content:`Selected country on map: ${popT||'none'}. Order: "${text}"`}]; }
-async function llmRaw(msgs){
-  if(WEBLLM){ const r=await WEBLLM.chat.completions.create({messages:msgs,temperature:0.3,max_tokens:160,response_format:{type:'json_object'}}); return r.choices[0].message.content; }
-  const tmo=(+CFG.timeout||60)*1000;
-  if(CFG.kind==='openai'){ const body={model:CFG.model,messages:msgs,temperature:+CFG.temperature,response_format:{type:'json_object'},stream:false};
-    let r=await xfetch(CFG.base.replace(/\/$/,'')+'/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},tmo);
-    if(r.status===400){ delete body.response_format; r=await xfetch(CFG.base.replace(/\/$/,'')+'/chat/completions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},tmo); }
-    if(!r.ok) throw new Error('HTTP '+r.status); return (await r.json()).choices[0].message.content; }
-  const body={model:CFG.model,messages:msgs,stream:false,format:ISCHEMA,options:{temperature:+CFG.temperature,num_ctx:2048}};
-  let r=await xfetch(CFG.base.replace(/\/$/,'')+'/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},tmo);
-  if(r.status===400||r.status===500){ body.format='json'; r=await xfetch(CFG.base.replace(/\/$/,'')+'/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)},tmo); }
-  if(!r.ok) throw new Error('HTTP '+r.status); return (await r.json()).message.content;
-}
-const llmReady=()=>!!WEBLLM||(!HOSTED&&CFG.enabled&&CFG.model&&(CFG.kind==='ollama'||CFG.kind==='openai'));
-async function llmInterpret(text,popT){
-  if(!llmReady()) return null; const msgs=intentPrompt(text,popT);
-  for(let i=0;i<2;i++){ let raw; try{ raw=await llmRaw(msgs); }catch(e){ setAIStatus('AI offline ('+(e.name==='AbortError'?'timeout':e.message)+') — parser used'); return null; }
-    try{ const v=validateIntent(raw); setAIStatus((WEBLLM?'on-device · '+WEBLLM_ID:CFG.kind+' · '+CFG.model)); return v; }
-    catch(e){ msgs.push({role:'assistant',content:String(raw).slice(0,800)},{role:'user',content:`Invalid (${e.message}). Reply with ONLY the JSON object.`}); } }
-  setAIStatus('AI gave invalid JSON twice — parser used'); return null; }
-async function loadWebLLM(modelId){
-  if(!('gpu' in navigator)) throw new Error('This browser has no WebGPU (needs iOS/Safari 26+, or recent Chrome/Edge).');
-  const ad=await navigator.gpu.requestAdapter(); if(!ad) throw new Error('No WebGPU adapter available.');
-  if(/q4f16/.test(modelId)&&!ad.features.has('shader-f16')) modelId=modelId.replace('q4f16_1','q4f32_1');
-  const webllm=await import('https://esm.run/@mlc-ai/web-llm');
-  WEBLLM=await webllm.CreateMLCEngine(modelId,{initProgressCallback:p=>{ $('#wl-out').textContent=p.text; }}); WEBLLM_ID=modelId; setAIStatus('on-device · '+modelId); return modelId; }
-
-
-/* ================= B2 world-AI bridge (optional) ================= */
-function b2World(){ const nat={}; NAT.forEach(c=>{ const n=S.nat[c]; nat[c]={alive:n.alive,army:Math.round(n.army),industry:Math.round(n.ind),stability:Math.round(n.stab)}; }); return {S:Object.assign({},S,{nat}),ADJ,REG,NAT}; }
-function validateResult(o,ctx){
-  if(!o||typeof o.narrative!=='string'||o.narrative.trim().length<3) throw new Error('missing narrative');
-  const arr=k=>Array.isArray(o[k])?o[k].filter(x=>x&&typeof x==='object'):[]; const isN=c=>typeof c==='string'&&D.N[c.toUpperCase()]&&alive(c.toUpperCase()); const U=c=>c.toUpperCase();
-  const out={narrative:o.narrative.trim().slice(0,1200),border_changes:[],relation_changes:[],reactions:[],events:[],wars:[],treaties:[],stat_changes:[]};
-  const decl=arr('wars').filter(w=>w.action==='declare').map(w=>[U(w.a||''),U(w.b||'')]);
-  for(const b of arr('border_changes')){ const r=REG[b.region]?b.region:null; if(!r||!isN(b.to)||out.border_changes.length>=1) continue; const to=U(b.to), from=S.owner[r]; if(from===to) continue;
-    const touches=[...ADJ[r]].some(x=>S.owner[x]===to); const fr=S.fronts.find(f=>f.a===to&&f.d===from&&f.r===r);
-    // conquest must go through fronts (prog>=50); cessions only for a diplomatic demand on that owner
-    if(touches&&((fr&&fr.prog>=50&&atWar(to,from))||(ctx.cession&&ctx.target===from&&!decl.length))) out.border_changes.push({region:r,to}); }
-  for(const r of arr('relation_changes')) if(isN(r.a)&&isN(r.b)&&U(r.a)!==U(r.b)&&Number.isFinite(+r.delta)) out.relation_changes.push({a:U(r.a),b:U(r.b),delta:clamp(Math.round(+r.delta),-40,40)});
-  for(const r of arr('reactions').slice(0,6)) if(isN(r.nation)&&typeof r.text==='string') out.reactions.push({nation:U(r.nation),text:r.text.slice(0,240)});
-  for(const e of arr('events').slice(0,4)) if(typeof e.text==='string') out.events.push({text:e.text.slice(0,240)});
-  for(const w of arr('wars')) if(['declare','peace'].includes(w.action)&&isN(w.a)&&isN(w.b)&&U(w.a)!==U(w.b)) out.wars.push({action:w.action,a:U(w.a),b:U(w.b)});
-  for(const t of arr('treaties')) if(['alliance','non_aggression','guarantee','trade'].includes(t.type)&&isN(t.a)&&isN(t.b)&&U(t.a)!==U(t.b)) out.treaties.push({type:t.type,a:U(t.a),b:U(t.b)});
-  for(const s of arr('stat_changes')) if(isN(s.nation)) out.stat_changes.push({nation:U(s.nation),army:clamp(Math.round(+s.army||0),-3,3),industry:clamp(Math.round(+s.industry||0),-2,2),stability:clamp(Math.round(+s.stability||0),-20,20)});
-  return out; }
-function applyResult(res){
-  for(const w of res.wars){ if(w.action==='declare') declareWar(w.a,w.b,'B2 world AI'); else if(atWar(w.a,w.b)) makePeace(w.a,w.b,'negotiated'); }
-  for(const b of res.border_changes) transfer(b.region,b.to,'per the world AI');
-  for(const r of res.relation_changes) addRel(r.a,r.b,r.delta);
-  for(const t of res.treaties) if(!hasT(t.type,t.a,t.b)&&!atWar(t.a,t.b)){ S.treaties.push(t); log('treaty',`📜 ${nm(t.a)} and ${nm(t.b)} sign a ${t.type.replace('_','-')} pact.`); }
-  for(const s of res.stat_changes){ const n=S.nat[s.nation]; n.army=Math.max(0.5,n.army+s.army); n.ind=Math.max(0.5,n.ind+s.industry); n.stab=clamp(n.stab+s.stability,0,100); }
-  for(const r of res.reactions) log('react',`${nm(r.nation)}: ${r.text}`);
-  for(const e of res.events){ log('event',e.text); news(e.text.slice(0,90)); }
-}
-const b2Ready=()=>!!(window.B2Link&&B2Link.ready());
-
 /* ================= TURN FLOW ================= */
-function snap(){ const p=P(); return {own:{...S.owner}, nat:JSON.parse(JSON.stringify(S.nat[p])), rel:Object.fromEntries(NAT.map(x=>[x,rel(p,x)])), wars:S.wars.map(w=>w.a+'|'+w.b), tre:S.treaties.map(t=>t.type+'|'+t.a+'|'+t.b), tension:S.tension, fronts:Object.fromEntries(S.fronts.filter(f=>f.a===p||f.d===p).map(f=>[f.a+f.d+f.r,f.prog])), news:S.news.length, newsTop:S.news[0]}; }
+function snap(){ const p=P(); return {betray:S.betray.length, occ:Object.keys(S.occ).filter(r=>S.owner[r]===p).length, own:{...S.owner}, nat:JSON.parse(JSON.stringify(S.nat[p])), rel:Object.fromEntries(NAT.map(x=>[x,rel(p,x)])), wars:S.wars.map(w=>w.a+'|'+w.b), tre:S.treaties.map(t=>t.type+'|'+t.a+'|'+t.b), tension:S.tension, fronts:Object.fromEntries(S.fronts.filter(f=>f.a===p||f.d===p).map(f=>[f.a+f.d+f.r,f.prog])), news:S.news.length, newsTop:S.news[0]}; }
 function diff(b){ const p=P(), out=[], n=S.nat[p];
   RIDS.forEach(r=>{ if(b.own[r]!==S.owner[r]){ if(S.owner[r]===p) out.push(`<li class="good">＋ ${esc(REG[r].name)} is now yours (from ${esc(nm(b.own[r]))})</li>`); else if(b.own[r]===p) out.push(`<li class="bad">− Lost ${esc(REG[r].name)} to ${esc(nm(S.owner[r]))}</li>`); } });
   const world={}; RIDS.forEach(r=>{ if(b.own[r]!==S.owner[r]&&S.owner[r]!==p&&b.own[r]!==p){ const k=nm(S.owner[r])+' took '; (world[k]=world[k]||[]).push(REG[r].name);} }); Object.entries(world).slice(0,5).forEach(([k,v])=>out.push(`<li>🌍 ${esc(k+v.join(', '))}</li>`));
-  const st=[['army','Army','div',1],['ind','Industry','',1],['gold','Gold','',0],['mp','Manpower','',0],['stab','Stability','',0]].map(([k,l,u,dp])=>{ const d=n[k]-b.nat[k]; return Math.abs(d)>=(dp?0.1:1)?`${l} ${d>0?'+':''}${d.toFixed(dp)}${u?' '+u:''}`:null; }).filter(Boolean);
+  const st=[['army','Infantry','div',1],['arm','Armour','',1],['art','Artillery','',1],['air','Air','',1],['nav','Fleets','',1],['ind','Industry','',1],['gold','Gold','',0],['pp','Political power','',0],['mp','Manpower','',0],['stab','Stability','',0]].map(([k,l,u,dp])=>{ const d=n[k]-b.nat[k]; return Math.abs(d)>=(dp?0.1:1)?`${l} ${d>0?'+':''}${d.toFixed(dp)}${u?' '+u:''}`:null; }).filter(Boolean);
   if(st.length) out.push(`<li>📊 ${st.join(' · ')}</li>`);
   NAT.forEach(x=>{ const d=rel(p,x)-b.rel[x]; if(Math.abs(d)>=3&&alive(x)) out.push(`<li class="${d>0?'good':'bad'}">🤝 ${esc(nm(x))} ${d>0?'+':''}${d} → ${rel(p,x)}</li>`); });
   S.wars.forEach(w=>{ if(!b.wars.includes(w.a+'|'+w.b)) out.push(`<li class="bad">⚔ War: ${esc(nm(w.a))} vs ${esc(nm(w.b))}${w.motive?` <small>(${esc(w.motive)})</small>`:''}</li>`); });
   b.wars.forEach(k=>{ if(!S.wars.some(w=>w.a+'|'+w.b===k)){ const [x,y]=k.split('|'); out.push(`<li class="good">🕊 Peace/ended: ${esc(nm(x))} – ${esc(nm(y))}</li>`);} });
   S.treaties.forEach(t=>{ if(!b.tre.includes(t.type+'|'+t.a+'|'+t.b)) out.push(`<li>📜 ${esc(t.type.replace('_','-'))}: ${esc(nm(t.a))} – ${esc(nm(t.b))}</li>`); });
   S.fronts.filter(f=>f.a===p||f.d===p).forEach(f=>{ const was=b.fronts[f.a+f.d+f.r]; out.push(`<li>🎯 Front ${esc(REG[f.r].name)} (${esc(nm(f.a))}→${esc(nm(f.d))}): ${Math.round(f.prog)}%${was!=null?` (${f.prog-was>=0?'+':''}${Math.round(f.prog-was)})`:' (new)'}${f.last?` · ratio ${f.last.ratio}, losses ${f.last.la}/${f.last.ld} div`:''}</li>`); });
+  b.tre.forEach(k=>{ if(!S.treaties.some(t=>t.type+'|'+t.a+'|'+t.b===k)){ const [ty,x,y]=k.split('|'); if(x===p||y===p) out.push(`<li class="bad">✂ ${esc((TNAME[ty]||ty))} ended: ${esc(nm(x))} – ${esc(nm(y))}</li>`); } });
+  S.betray.slice(b.betray).forEach(x=>out.push(`<li class="bad">🗡 Betrayal: ${esc(nm(x.by))} broke its ${esc(TNAME[x.type]||x.type)} with ${esc(nm(x.victim))} — remembered for years</li>`));
+  const oc=Object.keys(S.occ).filter(r=>S.owner[r]===p); if(oc.length) out.push(`<li>🔥 Occupied regions: ${oc.length} · avg resistance ${Math.round(oc.reduce((s,r)=>s+S.occ[r].res,0)/oc.length)}%</li>`);
   const dt=S.tension-b.tension; if(Math.abs(dt)>=1) out.push(`<li>🌡 World tension ${dt>0?'+':''}${Math.round(dt)} → ${Math.round(S.tension)}</li>`);
   return out; }
 function headlinesSince(b){ const k=S.news.indexOf(b.newsTop); return (k<0?S.news.slice(0,6):S.news.slice(0,k)).slice(0,6); }
 async function endMonth(){
-  economyTick(); aiDiplomacy(); aiWarCheck(); aiFronts();
+  economyTick(); aiDiplomacy(); aiDiploActions(); aiWarCheck(); aiFronts();
   const fs=S.fronts.slice().sort(()=>rnd()-0.5); for(const f of fs){ if(!S.fronts.includes(f)) continue; if(resolveFront(f)==='drop') S.fronts=S.fronts.filter(x=>x!==f); }
-  await runEvents();
+  await runEvents(); await aiOffers();
   S.m++; if(S.m>11){ S.m=0; S.y++; } S.turn++; S.tension=clamp(S.tension,0,100);
   if(!alive(P())) log('war',`${nm(P())} has fallen. Start a new game or load a save.`);
   autosave(); dirty=true;
 }
-async function submit(kind,target,region,text){
+async function submit(kind,target){
   if(busy||!S) return; busy=true; hidePopup(); showBusy(true); const before=snap(); S.flash=[]; dirty=true;
-  let title='', narr='', reply='', parsedNote='';
   try{
-    if(b2Ready()&&kind!=='advisor'){
-      const mv={kind,target,text}; let r=null;
-      try{ r=await B2Link.resolve(b2World(),mv,false,{onStatus:t=>{ $('#busy-t').textContent=t; setAIStatus(t); },validate:o=>validateResult(o,{target,cession:['free','demand','talk'].includes(kind)})}); }catch(e){ r=null; }
-      if(r){ log('turn',`— ${nm(P())}: ${text?'"'+text+'"':kind.toUpperCase()}${target&&target!==P()?' → '+nm(target):''} [B2]`); log('narr',r.narrative); applyResult(r);
-        if(kind==='attack'&&target&&atWar(P(),target)) openFront(P(),target,region);
-        $('#busy-t').textContent='The month passes…'; await endMonth();
-        showReport((text?`“${text}”`:kind.toUpperCase())+` — ${dateStr()}`,`<p>${esc(r.narrative)}</p><p><small>Resolved by B2 world AI</small></p>`,diff(before),headlinesSince(before)); return; }
-      $('#busy-t').textContent='Rules engine takes over…';
-    }
-    if(kind==='free'){
-      let it=null; if(llmReady()){ $('#busy-t').textContent='Your ministers confer…'; it=await llmInterpret(text,target); if(it&&it.intent==='unknown') { reply=it.reply; it=null; } }
-      if(it){ reply=it.reply; parsedNote=`AI understood: ${it.intent}${it.target?' → '+nm(it.target):''}`; kind=it.intent; target=it.target||target; region=it.region||null; }
-      else { const pz=parseIntent(text,target); if(!pz.intent){ showReport(`“${text}”`,`<p>Your ministers look at each other. Nobody is sure what you mean${pz.mentions.length?` regarding ${esc(pz.mentions.join(', '))}`:''}.</p><p>${reply?esc(reply)+' ':''}Try an order like: ${EXAMPLES.slice(0,8).map(e=>`<button class="ex">${e}</button>`).join(' ')}</p><p><small>No time has passed.</small></p>`,[],[]); return; }
-        kind=pz.intent; target=pz.target||target; region=pz.region; parsedNote=`Understood: ${kind.replace('_',' ')}${target?' → '+nm(target):''}${region?' ('+REG[region].name+')':''}`; }
-    }
-    title=(text?`“${text}”`:kind.replace('_',' ').toUpperCase()+(target&&target!==P()?' → '+nm(target):''));
-    const res=act(kind,target,region,text);
-    if(!res.ok){ showReport(title,`<p>${reply?`<i>${esc(reply)}</i><br>`:''}${esc(res.narr)}</p><p><small>${esc(parsedNote)} · No time has passed.</small></p>`,[],[]); return; }
-    if(res.noTime){ log('advisor',res.narr); showReport('Advisor',`<p>${esc(res.narr)}</p>`,[],[]); return; }
-    log('turn',`— ${nm(P())}: ${text?'"'+text+'"':kind.toUpperCase()}${target&&target!==P()?' → '+nm(target):''}`); log('narr',res.narr);
-    $('#busy-t').textContent='The month passes…';
-    await endMonth();
-    showReport(title+` — ${dateStr()}`,`${reply?`<p class="reply">${esc(reply)}</p>`:''}<p>${esc(res.narr)}</p>${parsedNote?`<p><small>${esc(parsedNote)}</small></p>`:''}`,diff(before),headlinesSince(before));
+    const p=P(), A=AXI(kind), T=A.scope==='self'?p:target; const title=A.label+(T&&T!==p?' → '+nm(T):'');
+    const res=doAction(kind,p,A.scope==='self'?null:T);
+    if(!res.ok){ showReport(title,`<p>${esc(res.narr)}</p><p><small>No time has passed.</small></p>`,[],[]); return; }
+    if(res.noTime){ if(kind==='advisor') log('advisor',res.narr); autosave(); showReport(title,`<p>${esc(res.narr)}</p><p><small>No time has passed.</small></p>`,diff(before),[]); return; }
+    log('turn',`— ${nm(p)}: ${title}`); log('narr',res.narr);
+    $('#busy-t').textContent='The month passes…'; await endMonth();
+    const oddsLine=res.od&&res.od.f.length&&!(A.note||'').startsWith('The %')?`<p class="odds">${res.success?'✔ Succeeded':'✖ Failed'} at ${pct(res.od.p)}</p>`:'';
+    showReport(title+` — ${dateStr()}`,`${oddsLine}<p>${esc(res.narr)}</p><p><small>Cost: ${costStr(res.cost)}</small></p>`,diff(before),headlinesSince(before));
   } finally { busy=false; showBusy(false); renderAll(); }
 }
 async function passTurn(){ if(busy||!S) return; busy=true; showBusy(true); const before=snap(); S.flash=[]; try{ log('turn','— You wait and watch.'); await endMonth(); showReport(`Month report — ${dateStr()}`,'<p>You hold your hand and watch the world move.</p>',diff(before),headlinesSince(before)); } finally{ busy=false; showBusy(false); renderAll(); } }
 
 /* ================= SAVE ================= */
 function autosave(){ try{ const c={...S}; delete c._hops; localStorage.setItem(SAVE_KEY,JSON.stringify(c)); }catch(e){} }
-function loadFrom(key){ const s=localStorage.getItem(key); if(!s) return false; try{ const o=JSON.parse(s); if(o.v!==3) return false; S=o; dirty=true; renderAll(); return true; }catch(e){ return false; } }
+function loadFrom(key){ const s=localStorage.getItem(key); if(!s) return false; try{ const o=JSON.parse(s); if(o.v!==4) return false; S=o; dirty=true; renderAll(); return true; }catch(e){ return false; } }
 
 /* ================= RENDERING (cached layer) ================= */
 let dirty=true;
@@ -610,7 +569,7 @@ function drawMap(){
 }
 function renderAll(){ if(!S) return; drawMap(); renderHUD(); renderLog(); renderRelations(); renderBriefing(); renderTicker(); }
 function renderHUD(){ const n=S.nat[P()]; $('#date').textContent=dateStr(); $('#pname').textContent=nm(P()); $('#pflag').style.background=D.N[P()][1];
-  $('#pstats').textContent=`💰${Math.floor(n.gold)} 🏭${n.ind.toFixed(1)} 🪖${n.army.toFixed(0)} ✊${Math.round(n.stab)}`;
+  $('#pstats').textContent=`💰${Math.floor(n.gold)} ⚖${Math.floor(n.pp)}PP 🏭${n.ind.toFixed(1)} 🪖${n.army.toFixed(0)}+${n.arm.toFixed(0)}🛡 ✊${Math.round(n.stab)}`;
   $('#tension i').style.width=Math.round(S.tension)+'%'; $('#tension b').textContent=Math.round(S.tension); }
 function renderTicker(){ $('#ticker span').textContent=S.news.length?S.news.join('   ✦   '):'—'; }
 function renderLog(){ $('#log').innerHTML=S.log.slice(0,150).map(l=>`<div class="le ${l.kind}"><span class="ld">${l.d}</span> ${esc(l.text)}</div>`).join(''); }
@@ -666,29 +625,37 @@ if(innerWidth>1100) document.body.classList.add('drawer');
 const MOBILE=()=>window.matchMedia('(max-width: 820px), (max-height: 500px)').matches;
 if(window.visualViewport){ const vv=window.visualViewport; const f=()=>document.documentElement.style.setProperty('--kb',Math.max(0,window.innerHeight-vv.height-vv.offsetTop)+'px'); vv.addEventListener('resize',f); vv.addEventListener('scroll',f); }
 
-/* ================= POPUP / SHEET ================= */
-let popTarget=null, popRegion=null, popOpenedAt=0;
+/* ================= POPUP / SHEET: tabbed actions ================= */
+let popTarget=null, popRegion=null, popOpenedAt=0, popTab='diplomacy', popPending=null;
+const TABS=[['diplomacy','Diplomacy'],['intrigue','Intrigue'],['economy','Economy'],['military','Military']];
+function actionsFor(n){ const self=n===P(); return Object.keys(AX).filter(k=>{ const s=AX[k][1]; return k!=='advisor'&&(s==='both'||(self?s==='self':s==='other')); }); }
+function renderActs(){ const n=popTarget, p=P(), self=n===p; const ks=actionsFor(n).filter(k=>AX[k][0]===popTab);
+  $('#pp-tabs').innerHTML=TABS.map(([k,l])=>{ const c=actionsFor(n).filter(x=>AX[x][0]===k).length; return `<button data-tab="${k}" class="${k===popTab?'on':''}" ${c?'':'disabled'}>${l}<small>${c}</small></button>`; }).join('');
+  $('#pp-acts').innerHTML=ks.map(k=>{ const A=AXI(k), chk=checkAction(k,p,self?null:n), c=costOf(k,p,self?null:n); const od=chk.od; const attack=(A.note||'').startsWith('The %');
+    return `<button data-act="${k}" class="act ${k==='attack'?'red':''}" ${chk.why?'disabled':''}><b>${esc(A.label)}</b><small>${esc(costStr(c))}${od?` · ${attack?'progress':'odds'} ${pct(od.p)}`:''}</small>${chk.why?`<small class="why">${esc(chk.why)}</small>`:''}</button>`; }).join('')+`<button data-act="advisor" class="act adv"><b>Ask advisor</b><small>free · no time passes</small></button>`;
+  $('#pp-conf').style.display='none'; $('#pp-acts').style.display='grid'; }
+function showConfirm(k){ const n=popTarget, p=P(), self=n===p, A=AXI(k), chk=checkAction(k,p,self?null:n); if(chk.why) return; const c=costOf(k,p,self?null:n), od=chk.od; popPending=k;
+  const attack=(A.note||'').startsWith('The %');
+  $('#pp-conf').innerHTML=`<h4>${esc(A.label)}${self?'':' → '+esc(nm(n))}</h4><div class="cf-cost">Cost: <b>${esc(costStr(c))}</b>${A.noTime?' · no time passes':' · takes 1 month'}</div>
+   ${od?`<div class="cf-odds">${attack?'Monthly progress chance':(k==='summit'?'Pact chance':'Chance they accept / it succeeds')}: <b>${pct(od.p)}</b><ul>${od.f.map(([l,v])=>`<li class="${v>0?'good':v<0?'bad':''}">${esc(l)}${v?` <small>${v>0?'+':''}${Math.round(v*100)}%</small>`:''}</li>`).join('')}</ul></div>`:'<div class="cf-odds">Certain — no one can refuse this.</div>'}
+   ${A.note?`<div class="cf-note">${esc(A.note)}</div>`:''}
+   <div class="row"><button id="cf-back">◀ Back</button><button id="cf-go" class="${k==='attack'||k==='break'?'red':'go'}">Commit ▸</button></div>`;
+  $('#pp-acts').style.display='none'; $('#pp-conf').style.display='block';
+  $('#cf-back').onclick=()=>{ popPending=null; renderActs(); }; $('#cf-go').onclick=()=>{ const t=popTarget; submit(k,t); }; }
 function showPopup(n,rid,x,y){ popTarget=n; popRegion=rid; popOpenedAt=lastPtrType==='mouse'?0:Date.now(); const p=P(), pp=$('#popup'), st=S.nat[n];
   $('#pp-title').textContent=nm(n)+(n===p?' (you)':''); $('#pp-flag').style.background=D.N[n][1];
-  const fr=S.fronts.find(f=>f.r===rid);
-  $('#pp-info').innerHTML=`<b>${esc(REG[rid].name)}</b> · ${TERR[REG[rid].t][0]}${REG[rid].river?' + river':''}${S.fort[rid]?' · forts '+S.fort[rid]:''}${fr?` · front ${Math.round(fr.prog)}%`:''}<br>${IDEO(n)} · army ${st.army.toFixed(0)} · industry ${st.ind.toFixed(1)} · stability ${Math.round(st.stab)}${n!==p?`<br>Relations: <b>${rel(p,n)}</b>${atWar(p,n)?' <b class="war">AT WAR</b>':''}${hasT('alliance',p,n)?' · ally':''}`:''}`;
-  const self=n===p; $('#pp-acts').innerHTML=(self?[['build_industry','Build factories'],['build_army','Build army'],['fortify','Fortify'],['mobilize','Mobilize'],['propaganda','Propaganda'],['advisor','Ask Advisor']]:[['talk','Talk to'],['act','Act ▾'],['attack','Attack'],['defend','Defend'],['advisor','Ask Advisor']]).map(([k,l])=>`<button data-act="${k}" class="${k==='attack'?'red':''}">${l}</button>`).join('');
-  $('#pp-sub').innerHTML=''; $('#pp-sub').style.display='none';
-  pp.style.display='block'; if(MOBILE()){ pp.classList.add('sheet'); pp.style.left=''; pp.style.top=''; } else { pp.classList.remove('sheet'); const w=pp.offsetWidth,h=pp.offsetHeight; pp.style.left=Math.min(innerWidth-w-8,x+10)+'px'; pp.style.top=Math.min(innerHeight-h-8,Math.max(8,y-20))+'px'; }
-  $('#pp-text').value=''; }
+  const fr=S.fronts.find(f=>f.r===rid), oc=S.occ[rid];
+  $('#pp-info').innerHTML=`<b>${esc(REG[rid].name)}</b> · ${TERR[REG[rid].t][0]}${REG[rid].river?' + river':''}${S.fort[rid]?' · forts '+S.fort[rid]:''}${fr?` · front ${Math.round(fr.prog)}%`:''}${oc?` · occupied, resistance ${Math.round(oc.res)}%`:''}<br>${IDEO(n)} · ${st.army.toFixed(0)} inf / ${st.arm.toFixed(1)} arm / ${st.art.toFixed(1)} art / ${st.air.toFixed(1)} air / ${st.nav.toFixed(1)} fleets · ind ${st.ind.toFixed(1)} · stab ${Math.round(st.stab)}${n!==p?`<br>Relations <b>${rel(p,n)}</b>${atWar(p,n)?' <b class="war">AT WAR</b>':''}${pactsBetween(p,n).length?' · '+pactsBetween(p,n).map(t=>TNAME[t.type]||t.type).join(', '):''}${grudge(n,p)>1?` · <b class="war">remembers your betrayal</b>`:''}${factionOf(n)?' · '+esc(factionOf(n).name):''}`:''}`;
+  popTab=n===p?'economy':'diplomacy'; renderActs();
+  pp.style.display='block'; if(MOBILE()){ pp.classList.add('sheet'); pp.style.left=''; pp.style.top=''; } else { pp.classList.remove('sheet'); const w=pp.offsetWidth,h=pp.offsetHeight; pp.style.left=Math.max(8,Math.min(innerWidth-w-8,x+10))+'px'; pp.style.top=Math.min(innerHeight-h-8,Math.max(8,y-20))+'px'; } }
 function hidePopup(){ $('#popup').style.display='none'; }
-$('#pp-acts').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b||Date.now()-popOpenedAt<350) return; const k=b.dataset.act;
-  if(k==='act'){ const sub=$('#pp-sub'); sub.innerHTML=[['trade','Trade'],['spy','Spy'],['propaganda','Propaganda'],['embargo','Embargo'],['demand','Demand land'],['alliance','Propose alliance'],['nap','Non-aggression'],['guarantee','Guarantee'],['peace','Offer peace'],['insult','Denounce']].map(([k,l])=>`<button data-act="${k}">${l}</button>`).join(''); sub.style.display='grid'; return; }
-  if(k==='defend') return submit(popTarget===P()?'fortify':'guarantee',popTarget,popRegion);
-  submit(k,popTarget,popRegion); });
-$('#pp-sub').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b) return; submit(b.dataset.act,popTarget,popRegion); });
-$('#pp-form').addEventListener('submit',e=>{ e.preventDefault(); const t=$('#pp-text').value.trim(); if(!t) return; $('#pp-text').blur(); submit('free',popTarget,null,t.slice(0,300)); });
+$('#pp-tabs').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b||b.disabled) return; popTab=b.dataset.tab; renderActs(); });
+$('#pp-acts').addEventListener('click',e=>{ const b=e.target.closest('button'); if(!b||b.disabled||Date.now()-popOpenedAt<350) return; const k=b.dataset.act; if(k==='advisor') return submit('advisor',popTarget); showConfirm(k); });
 $('#pp-close').onclick=hidePopup;
-$('#cmd-form').addEventListener('submit',e=>{ e.preventDefault(); const t=$('#cmd').value.trim(); if(!t) return; $('#cmd').value=''; $('#cmd').blur(); submit('free',null,null,t.slice(0,300)); });
 
 /* ================= MODALS ================= */
 function showReport(title,body,bullets,heads){ $('#rp-title').textContent=title; $('#rp-body').innerHTML=body+(bullets.length?`<h4>What changed</h4><ul class="chg">${bullets.join('')}</ul>`:'')+(heads.length?`<h4>Headlines</h4><ul class="hd">${heads.map(h=>`<li>${esc(h)}</li>`).join('')}</ul>`:''); $('#report').style.display='flex';
-  $('#rp-body').querySelectorAll('.ex').forEach(b=>b.onclick=()=>{ $('#report').style.display='none'; $('#cmd').value=b.textContent; $('#cmd').focus(); }); }
+}
 $('#rp-ok').onclick=()=>{ $('#report').style.display='none'; };
 function askDecision(e){ return new Promise(res=>{ showBusy(false); $('#dc-title').textContent=e.title; $('#dc-text').textContent=typeof e.text==='function'?e.text():e.text; $('#dc-opts').innerHTML=e.opts.map((o,i)=>`<button data-i="${i}">${esc(o.t)}</button>`).join(''); $('#decision').style.display='flex';
   $('#dc-opts').querySelectorAll('button').forEach(b=>b.onclick=()=>{ $('#decision').style.display='none'; showBusy(true); res(+b.dataset.i); }); }); }
@@ -696,49 +663,14 @@ function showBusy(on){ $('#busy').style.display=on?'flex':'none'; if(!on) $('#bu
 
 /* ================= TOOLBAR / SETTINGS ================= */
 $('#btn-pass').onclick=passTurn;
-$('#btn-save').onclick=()=>{ const c={...S}; delete c._hops; localStorage.setItem('ww2ai.v3.slot'+$('#slot').value,JSON.stringify(c)); log('event',`Saved to slot ${$('#slot').value}.`); renderLog(); };
-$('#btn-load').onclick=()=>{ if(!loadFrom('ww2ai.v3.slot'+$('#slot').value)) alert('Slot empty.'); };
+$('#btn-save').onclick=()=>{ const c={...S}; delete c._hops; localStorage.setItem('ww2ai.v4.slot'+$('#slot').value,JSON.stringify(c)); log('event',`Saved to slot ${$('#slot').value}.`); renderLog(); };
+$('#btn-load').onclick=()=>{ if(!loadFrom('ww2ai.v4.slot'+$('#slot').value)) alert('Slot empty.'); };
 $('#btn-export').onclick=()=>{ const a=document.createElement('a'); const c={...S}; delete c._hops; a.href=URL.createObjectURL(new Blob([JSON.stringify(c)],{type:'application/json'})); a.download=`inkiron-${S.y}-${S.m+1}.json`; a.click(); };
 $('#btn-import').onclick=()=>$('#importfile').click();
-$('#importfile').onchange=async e=>{ const f=e.target.files[0]; if(!f) return; try{ const o=JSON.parse(await f.text()); if(o.v!==3) throw 0; S=o; dirty=true; renderAll(); }catch(err){ alert('Bad save file'); } };
+$('#importfile').onchange=async e=>{ const f=e.target.files[0]; if(!f) return; try{ const o=JSON.parse(await f.text()); if(o.v!==4) throw 0; S=o; dirty=true; renderAll(); }catch(err){ alert('Bad save file'); } };
 $('#btn-new').onclick=()=>{ if(confirm('Start a new game?')) showStart(); };
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{ document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on')); t.classList.add('on'); document.querySelectorAll('.pane').forEach(p=>p.style.display=p.id===t.dataset.p?'block':'none'); });
 $('#rels').addEventListener('click',e=>{ const r=e.target.closest('.rr'); if(!r) return; const n=r.dataset.n, cap=capOf(n); showPopup(n,cap,innerWidth/2,innerHeight/3); });
-function setAIStatus(t){ $('#ai-status').textContent='AI: '+t; }
-function fillSettings(){ $('#s-enabled').checked=CFG.enabled; $('#s-kind').value=CFG.kind; $('#s-base').value=CFG.base; $('#s-model').value=CFG.model; $('#s-timeout').value=CFG.timeout; $('#s-temp').value=CFG.temperature;
-  $('#hosted-note').style.display=HOSTED?'block':'none'; document.querySelectorAll('#settings .llm input,#settings .llm select,#settings .llm button').forEach(x=>x.disabled=HOSTED);
-  $('#wl-gpu').textContent=('gpu' in navigator)?'WebGPU detected ✔':'No WebGPU in this browser ✖ (on iPhone needs iOS 26+)'; $('#wl-load').disabled=!('gpu' in navigator)||!!WEBLLM; }
-function readSettings(){ if(HOSTED) return; CFG.enabled=$('#s-enabled').checked; CFG.kind=$('#s-kind').value; CFG.base=$('#s-base').value.trim(); CFG.model=$('#s-model').value.trim(); CFG.timeout=+$('#s-timeout').value||60; CFG.temperature=+$('#s-temp').value||0.4; saveCfg(); }
-$('#btn-settings').onclick=()=>{ fillSettings(); $('#settings').style.display='flex'; };
-$('#start-settings').onclick=()=>$('#btn-settings').click();
-$('#s-close').onclick=()=>{ readSettings(); $('#settings').style.display='none'; if(!WEBLLM) setAIStatus(llmReady()?`${CFG.kind} · ${CFG.model}`:'rules engine + order parser'); };
-async function runDetect(){ $('#s-detect-out').textContent='Scanning localhost…'; const {found,hintModels}=await autodetect();
-  if(!found.length){ $('#s-detect-out').textContent='No local model server found. The rules engine + order parser will run the game.'; return false; }
-  const f=found[0]; CFG.kind=f.kind; CFG.base=f.base; CFG.model=pickModel(f.models,hintModels); saveCfg(); fillSettings(); $('#s-modellist').innerHTML=f.models.map(m=>`<option value="${esc(m)}">`).join('');
-  $('#s-detect-out').textContent=`Found ${f.kind} at ${f.base}: ${f.models.join(', ')}`; setAIStatus(`${f.kind} · ${CFG.model}`); return true; }
-$('#s-detect').onclick=runDetect;
-$('#s-test').onclick=async()=>{ readSettings(); $('#s-detect-out').textContent='Asking the model…'; const t0=performance.now(); try{ const v=validateIntent(await llmRaw(intentPrompt('Invade Poland',null))); $('#s-detect-out').textContent=`OK in ${((performance.now()-t0)/1000).toFixed(1)}s → ${v.intent} ${v.target||''}: "${v.reply}"`; }catch(e){ $('#s-detect-out').textContent='Test failed: '+e.message; } };
-$('#wl-load').onclick=async()=>{ const id=$('#wl-model').value; if(!confirm(`Download the on-device AI model (${$('#wl-model').selectedOptions[0].dataset.size})? It is cached by your browser afterwards. Use Wi-Fi.`)) return; $('#wl-load').disabled=true;
-  try{ const got=await loadWebLLM(id); $('#wl-out').textContent='Loaded '+got+'. Typed orders now go through the on-device AI (parser still checks).'; }catch(e){ $('#wl-out').textContent='Could not load on-device AI: '+e.message+' — the rules engine + parser keep working.'; WEBLLM=null; $('#wl-load').disabled=false; } };
-
-function fillB2(){ if(!window.B2Link) return; const c=B2Link.cfg(); $('#b2-enabled').checked=c.enabled; $('#b2-repo').value=c.repo||''; $('#b2-wh').checked=c.wake==='webhook'; $('#b2-prnum').value=c.pr||1;
-  ['b2-hook','b2-key','b2-token'].forEach(id=>{ $('#'+id).value=''; });
-  const msgs=B2Link.takeNotes().concat(B2Link.check(c)); $('#b2-out').textContent=msgs.length?msgs.join('. ')+'.':'';
-  $('#b2-state').textContent=`Stored in this browser only: token ${c.token?B2Link.mask(c.token):'—'} · wake: ${c.wake==='webhook'?'webhook':'PR #'+(c.pr||1)+' comment'}${c.wake==='webhook'?` · webhook ${c.hookUrl?'✔':'—'} · key ${c.hookKey?'✔':'—'}`:''} · ${B2Link.ready()?'READY (B2 is the AI)':'not active'}`; }
-function saveB2(){ if(!window.B2Link) return; const c=B2Link.cfg(), patch={enabled:$('#b2-enabled').checked, repo:$('#b2-repo').value.trim()||c.repo, wake:$('#b2-wh').checked?'webhook':'ghcomment', pr:+$('#b2-prnum').value||1};
-  [['b2-hook','hookUrl'],['b2-key','hookKey'],['b2-token','token']].forEach(([id,k])=>{ const v=$('#'+id).value.trim(); if(v) patch[k]=v; }); B2Link.saveCfg(patch); fillB2(); }
-$('#b2-save').onclick=()=>{ saveB2(); };
-$('#b2-forget').onclick=()=>{ if(window.B2Link){ B2Link.forget(); fillB2(); $('#b2-out').textContent='B2 credentials removed from this browser.'; } };
-$('#b2-test').onclick=async()=>{ saveB2(); const c=B2Link.cfg(); const out=$('#b2-out'); if(!c.repo||!c.token){ out.textContent='Need the turns repo and the token.'; return; } const iss=B2Link.check(c); if(iss.length){ out.textContent=iss.join('. ')+'.'; return; } const pre=out.textContent?out.textContent+'\n':''; out.textContent=pre+'Checking GitHub access…';
-  try{ const r=await B2Link.gfetch(`https://api.github.com/repos/${c.repo}`,{headers:{'Authorization':'Bearer '+c.token,'Accept':'application/vnd.github+json'}});
-    if(!r.ok){ out.textContent=pre+`GitHub said HTTP ${r.status} — check the token/repo.`; return; }
-    const pv=(await r.json()).private; out.textContent=pre+`Token OK: ${c.repo} is reachable (${pv?'private':'PUBLIC — should be private!'}). Sending a probe to B2…`;
-    if(c.wake==='webhook'&&(!c.hookUrl||!c.hookKey)){ out.textContent+=' Webhook URL/key missing.'; return; }
-    const head=out.textContent; const res=await B2Link.probe({onStatus:t=>out.textContent=head+'\n'+t});
-    out.textContent=head+'\n'+(res.ok?`B2 answered: "${String(res.msg).slice(0,160)}"`:res.stage==='wake'?`Could not wake B2: ${res.msg}.`+(/403|404/.test(res.msg)?' The token needs "Pull requests: write" on this repo.':''):`B2 problem: ${res.msg}`); }
-  catch(e){ out.textContent='Test failed: '+e.message+' (network). The rules engine will be used.'; } };
-$('#btn-settings').addEventListener('click',fillB2);
-
 /* ================= START ================= */
 function showStart(){ const majors=NAT.filter(n=>D.N[n][8]), minors=NAT.filter(n=>!D.N[n][8]&&n!=='NSP');
   const btn=n=>`<button class="nb" data-n="${n}"><span class="sw" style="background:${D.N[n][1]}"></span>${esc(nm(n))}<small>${IDEO(n)}</small></button>`;
@@ -747,11 +679,9 @@ function showStart(){ const majors=NAT.filter(n=>D.N[n][8]), minors=NAT.filter(n
   document.querySelectorAll('#start .nb').forEach(b=>b.onclick=()=>{ $('#start').style.display='none'; newGame(b.dataset.n); }); }
 $('#start-continue').onclick=()=>{ if(loadFrom(SAVE_KEY)){ $('#start').style.display='none'; centerOn(P()); } };
 
-window.WW2={ get state(){return S;}, REG, ADJ, LANDADJ, parseIntent, validateIntent, validateResult, applyResult, b2Ready, rel, act, frontCalc, eff, endMonth, submit, passTurn, get hosted(){return HOSTED;}, get cfg(){return CFG;}, VW,
+window.WW2={ get state(){return S;}, REG, ADJ, LANDADJ, rel, AX, checkAction, doAction, grudge, rep, warScore, factionOf, betray, COAST, frontCalc, eff, endMonth, submit, passTurn, VW,
   regionXY(rid){ const [x,y]=toPx(REG[rid].lon,REG[rid].lat); const b=canvas.getBoundingClientRect(); return [b.left+x*b.width/canvas.width, b.top+y*b.height/canvas.height]; },
   focus(rid,s){  const [x,y]=toPx(REG[rid].lon,REG[rid].lat); VW.s=VW.fit*(s||6); VW.x=wrap.clientWidth/2-x*VW.s; VW.y=wrap.clientHeight/2-y*VW.s; applyView(); }, cellOwnerAt(rid){ return S.owner[rid]; },
   regionPixels(rid){ const i=RIDS.indexOf(rid), out=[]; for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++) if(GRID[r*COLS+c]===i){ const d=ctx.getImageData(c*CS+1,r*CS+1,1,1).data; out.push([d[0],d[1],d[2]]); } return out; }, pixelAt(rid){ const [x,y]=toPx(REG[rid].lon,REG[rid].lat); const d=ctx.getImageData(Math.round(x)+6,Math.round(y)+6,1,1).data; return [d[0],d[1],d[2]]; }, RGB };
-(async function init(){ await detectProxy(); fitView(); showStart();
-  if(HOSTED) setAIStatus('rules engine + order parser (optional on-device AI in Settings)');
-  else if(CFG.enabled&&(CFG.kind==='auto'||!CFG.model)){ fillSettings(); runDetect(); } else setAIStatus(llmReady()?`${CFG.kind} · ${CFG.model}`:'rules engine + order parser'); })();
+(function init(){ fitView(); showStart(); })();
 })();
