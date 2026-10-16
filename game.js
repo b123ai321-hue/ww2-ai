@@ -18,7 +18,7 @@ const nm=c=>(D.N[c]||[c])[0];
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
 /* ================= MAP GRID ================= */
-const LON0=-180, LON1=180, LAT0=-56, LAT1=84, KX=0.8, STEP=0.5, CS=4;
+const LON0=-180, LON1=180, LAT0=-56, LAT1=84, KX=0.8, STEP=0.25, CS=4;
 const COLS=Math.ceil((LON1-LON0)*KX/STEP), ROWS=Math.ceil((LAT1-LAT0)/STEP);
 const POLYS=[]; for(const k in D.LAND){ const p=D.LAND[k]; let x0=1e9,x1=-1e9,y0=1e9,y1=-1e9; p.forEach(([x,y])=>{x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);}); POLYS.push({k,p,x0,x1,y0,y1}); }
 const SEAS=Object.values(D.SEA);
@@ -606,15 +606,7 @@ function drawMap(){
         const col=kind==='war'?[190,20,10]:[15,11,8];
         setPx(x,y,...col); if(dc){ if(x-1>=0) setPx(x-1,y,...col); } else { if(y-1>=0) setPx(x,y-1,...col); } } } }
   ctx.putImageData(img,0,0);
-  // capitals + labels
-  ctx.textAlign='center'; ctx.textBaseline='middle';
-  NAT.forEach(n=>{ if(!alive(n)) return; const regs=regionsOf(n); if(!regs.length) return; const cap=capOf(n); const [x,y]=toPx(REG[cap].lon,REG[cap].lat);
-    ctx.fillStyle='#0d0a07'; ctx.beginPath(); ctx.arc(x,y,3,0,7); ctx.fill(); ctx.strokeStyle='#efe6cf'; ctx.lineWidth=1.2; ctx.stroke();
-    const size=Math.round(clamp(7+Math.sqrt(regs.length)*3.2,8,24)); ctx.font=`900 ${size}px Impact,"Arial Narrow",sans-serif`;
-    const label=n==='UK'?'BRITAIN':n==='SOV'?'U.S.S.R.':n==='USA'?'U.S.A.':nm(n).toUpperCase();
-    ctx.lineWidth=3; ctx.strokeStyle='rgba(239,230,207,0.85)'; ctx.strokeText(label,x,y-size*0.8); ctx.fillStyle=n===S.player?'#7a0c06':'#0d0a07'; ctx.fillText(label,x,y-size*0.8); });
-  // player front arrows
-  S.fronts.forEach(f=>{ const [x,y]=toPx(REG[f.r].lon,REG[f.r].lat); ctx.fillStyle=f.a===S.player?'#b3140c':'rgba(20,10,5,.8)'; ctx.font='900 14px Impact,sans-serif'; ctx.fillText('✕',x,y); });
+  drawOverlay();
 }
 function renderAll(){ if(!S) return; drawMap(); renderHUD(); renderLog(); renderRelations(); renderBriefing(); renderTicker(); }
 function renderHUD(){ const n=S.nat[P()]; $('#date').textContent=dateStr(); $('#pname').textContent=nm(P()); $('#pflag').style.background=D.N[P()][1];
@@ -628,11 +620,25 @@ function renderRelations(){ const p=P(); const rows=NAT.filter(x=>x!==p&&alive(x
 
 /* ================= VIEW: pinch / pan / tap ================= */
 const wrap=$('#mapwrap'); const VW={s:1,x:0,y:0,fit:1};
-function applyView(){ canvas.style.transform=`translate(${VW.x}px,${VW.y}px) scale(${VW.s})`; }
+const ov=document.createElement('canvas'); ov.id='ov'; wrap.insertBefore(ov,canvas.nextSibling); const octx=ov.getContext('2d'); let ovQ=false;
+function applyView(){ canvas.style.transform=`translate(${VW.x}px,${VW.y}px) scale(${VW.s})`; if(!ovQ){ ovQ=true; requestAnimationFrame(()=>{ ovQ=false; drawOverlay(); }); } }
+/* Labels/markers live on a screen-space overlay: fixed readable size, they spread apart as you zoom in. */
+function drawOverlay(){ const dpr=Math.min(3,window.devicePixelRatio||1), w=wrap.clientWidth, h=wrap.clientHeight;
+  if(ov.width!==Math.round(w*dpr)||ov.height!==Math.round(h*dpr)){ ov.width=Math.round(w*dpr); ov.height=Math.round(h*dpr); ov.style.width=w+'px'; ov.style.height=h+'px'; }
+  octx.setTransform(dpr,0,0,dpr,0,0); octx.clearRect(0,0,w,h); if(!S) return;
+  const sp=(lon,lat)=>{ const [x,y]=toPx(lon,lat); return [VW.x+x*VW.s, VW.y+y*VW.s]; }, on=(x,y,m)=>x>-m&&y>-m&&x<w+m&&y<h+m;
+  const z=VW.s/VW.fit; octx.textAlign='center'; octx.textBaseline='middle'; octx.lineJoin='round';
+  const ppd=VW.s*CS*KX/STEP; if(ppd>=(w<600?30:26)){ octx.font='italic 600 10px Georgia,serif'; RIDS.forEach(id=>{ const r=REG[id]; const [x,y]=sp(r.lon,r.lat); if(!on(x,y,60)) return; octx.lineWidth=3; octx.strokeStyle='rgba(239,230,207,0.7)'; octx.strokeText(r.name,x,y+9); octx.fillStyle='#2a2018'; octx.fillText(r.name,x,y+9); }); }
+  NAT.forEach(n=>{ if(!alive(n)) return; const regs=regionsOf(n); if(!regs.length) return; const cap=capOf(n); const [x,y]=sp(REG[cap].lon,REG[cap].lat); if(!on(x,y,200)) return;
+    octx.fillStyle='#0d0a07'; octx.beginPath(); octx.arc(x,y,2.5,0,7); octx.fill(); octx.strokeStyle='#efe6cf'; octx.lineWidth=1.4; octx.stroke();
+    const size=Math.round(clamp(9+Math.sqrt(regs.length)*1.1,9,16)); octx.font=`900 ${size}px Impact,"Arial Narrow",sans-serif`;
+    const label=n==='UK'?'BRITAIN':n==='SOV'?'U.S.S.R.':n==='USA'?'U.S.A.':nm(n).toUpperCase();
+    octx.lineWidth=3; octx.strokeStyle='rgba(239,230,207,0.9)'; octx.strokeText(label,x,y-size*0.85); octx.fillStyle=n===S.player?'#7a0c06':'#0d0a07'; octx.fillText(label,x,y-size*0.85); });
+  octx.font='900 13px Impact,sans-serif'; S.fronts.forEach(f=>{ const [x,y]=sp(REG[f.r].lon,REG[f.r].lat); if(!on(x,y,20)) return; octx.lineWidth=3; octx.strokeStyle='rgba(239,230,207,0.9)'; octx.strokeText('✕',x,y); octx.fillStyle=f.a===S.player?'#b3140c':'rgba(20,10,5,.85)'; octx.fillText('✕',x,y); }); }
 function fitView(){ const w=wrap.clientWidth,h=wrap.clientHeight; VW.fit=Math.min(w/canvas.width,h/canvas.height); VW.s=VW.fit; VW.x=(w-canvas.width*VW.s)/2; VW.y=(h-canvas.height*VW.s)/2; applyView(); }
-function clampView(){ const w=wrap.clientWidth,h=wrap.clientHeight,cw=canvas.width*VW.s,ch=canvas.height*VW.s; VW.x=cw<=w?(w-cw)/2:clamp(VW.x,w-cw-40,40); VW.y=ch<=h?(h-ch)/2:clamp(VW.y,h-ch-40,40); applyView(); }
-function zoomAt(px,py,f){ const ns=clamp(VW.s*f,VW.fit*0.9,VW.fit*18); const k=ns/VW.s; VW.x=px-(px-VW.x)*k; VW.y=py-(py-VW.y)*k; VW.s=ns; clampView(); }
-function centerOn(c){ fitView(); const cap=capOf(c); if(!cap) return; const [x,y]=toPx(REG[cap].lon,REG[cap].lat); const w=wrap.clientWidth,h=wrap.clientHeight; const big=regionsOf(c).length>12; VW.s=Math.min(VW.fit*18, Math.max(VW.fit*(big?2.5:5), w/1100)); VW.x=w/2-x*VW.s; VW.y=h/2-y*VW.s; clampView(); }
+function clampView(){ const w=wrap.clientWidth,h=wrap.clientHeight,cw=canvas.width*VW.s,ch=canvas.height*VW.s; VW.x=cw<=w?(w-cw)/2:clamp(VW.x,w-cw-w*0.4,w*0.4); VW.y=ch<=h?(h-ch)/2:clamp(VW.y,h-ch-h*0.4,h*0.4); applyView(); }
+function zoomAt(px,py,f){ const ns=clamp(VW.s*f,VW.fit*0.6,VW.fit*60); const k=ns/VW.s; VW.x=px-(px-VW.x)*k; VW.y=py-(py-VW.y)*k; VW.s=ns; clampView(); }
+function centerOn(c){ fitView(); const cap=capOf(c); if(!cap) return; const [x,y]=toPx(REG[cap].lon,REG[cap].lat); const w=wrap.clientWidth,h=wrap.clientHeight; const ppd=w<600?16:24; VW.s=Math.max(VW.fit*1.2, ppd*STEP/(CS*KX)); VW.x=w/2-x*VW.s; VW.y=h/2-y*VW.s; clampView(); }
 window.addEventListener('resize',()=>{ const s=VW.s/VW.fit; fitView(); if(s>1.05){ VW.s=VW.fit*s; clampView(); } });
 function cellAt(e){ const b=canvas.getBoundingClientRect(); const x=(e.clientX-b.left)*canvas.width/b.width, y=(e.clientY-b.top)*canvas.height/b.height; const c=Math.floor(x/CS), r=Math.floor(y/CS); if(c<0||r<0||c>=COLS||r>=ROWS) return null; const g=GRID[r*COLS+c]; return g<0?null:RIDS[g]; }
 const ptrs=new Map(); let gesture=null, lastPtrType='mouse';
@@ -644,7 +650,7 @@ canvas.addEventListener('pointermove',e=>{
   if(!ptrs.has(e.pointerId)) return; ptrs.set(e.pointerId,{x:e.clientX,y:e.clientY}); if(!gesture) return;
   if(gesture.type!=='pinch'&&ptrs.size===1){ const dx=e.clientX-gesture.sx, dy=e.clientY-gesture.sy; if(gesture.type==='tap'&&Math.hypot(dx,dy)>8) gesture.type='pan'; if(gesture.type==='pan'){ VW.x=gesture.vx+dx; VW.y=gesture.vy+dy; clampView(); } }
   else if(gesture.type==='pinch'&&ptrs.size>=2){ const [p,q]=[...ptrs.values()]; const d=Math.hypot(p.x-q.x,p.y-q.y), cx=(p.x+q.x)/2, cy=(p.y+q.y)/2; const b=wrap.getBoundingClientRect();
-    const ns=clamp(gesture.s*d/gesture.d,VW.fit*0.9,VW.fit*18); const ox=gesture.cx-b.left, oy=gesture.cy-b.top; VW.s=ns; VW.x=ox-(ox-gesture.vx)*(ns/gesture.s)+(cx-gesture.cx); VW.y=oy-(oy-gesture.vy)*(ns/gesture.s)+(cy-gesture.cy); clampView(); } });
+    const ns=clamp(gesture.s*d/gesture.d,VW.fit*0.6,VW.fit*60); const ox=gesture.cx-b.left, oy=gesture.cy-b.top; VW.s=ns; VW.x=ox-(ox-gesture.vx)*(ns/gesture.s)+(cx-gesture.cx); VW.y=oy-(oy-gesture.vy)*(ns/gesture.s)+(cy-gesture.cy); clampView(); } });
 function endPtr(e){ if(!ptrs.has(e.pointerId)) return; lastPtrType=e.pointerType; ptrs.delete(e.pointerId);
   if(gesture&&gesture.type==='tap'&&ptrs.size===0&&Date.now()-gesture.t<700&&S&&!busy){ const id=cellAt(e); if(!id) hidePopup(); else showPopup(S.owner[id],id,e.clientX,e.clientY); }
   if(ptrs.size===0) gesture=null; else if(gesture&&gesture.type==='pinch'){ const [p]=[...ptrs.values()]; gesture={type:'pan',sx:p.x,sy:p.y,vx:VW.x,vy:VW.y}; } }
@@ -654,6 +660,9 @@ canvas.addEventListener('pointerleave',e=>{ if(e.pointerType==='mouse') $('#tip'
 wrap.addEventListener('wheel',e=>{ e.preventDefault(); const b=wrap.getBoundingClientRect(); zoomAt(e.clientX-b.left,e.clientY-b.top,e.deltaY<0?1.2:1/1.2); },{passive:false});
 ['gesturestart','gesturechange'].forEach(t=>wrap.addEventListener(t,e=>e.preventDefault(),{passive:false}));
 $('#zin').onclick=()=>zoomAt(wrap.clientWidth/2,wrap.clientHeight/2,1.5); $('#zout').onclick=()=>zoomAt(wrap.clientWidth/2,wrap.clientHeight/2,1/1.5); $('#zfit').onclick=fitView; $('#zme').onclick=()=>S&&centerOn(P());
+const hdr=document.querySelector('header'); const setHH=()=>document.documentElement.style.setProperty('--hh',hdr.offsetHeight+'px'); setHH(); window.addEventListener('resize',setHH);
+if(innerWidth>1100) document.body.classList.add('drawer'); 
+{ const b=document.createElement('button'); b.id='btn-panel'; b.textContent='☰ Briefing'; b.onclick=()=>{ document.body.classList.toggle('drawer'); setTimeout(drawOverlay,260); }; hdr.querySelector('.btns').prepend(b); setHH(); }
 const MOBILE=()=>window.matchMedia('(max-width: 820px), (max-height: 500px)').matches;
 if(window.visualViewport){ const vv=window.visualViewport; const f=()=>document.documentElement.style.setProperty('--kb',Math.max(0,window.innerHeight-vv.height-vv.offsetTop)+'px'); vv.addEventListener('resize',f); vv.addEventListener('scroll',f); }
 
@@ -737,7 +746,7 @@ $('#start-continue').onclick=()=>{ if(loadFrom(SAVE_KEY)){ $('#start').style.dis
 
 window.WW2={ get state(){return S;}, REG, ADJ, LANDADJ, parseIntent, validateIntent, validateResult, applyResult, b2Ready, rel, act, frontCalc, eff, endMonth, submit, passTurn, get hosted(){return HOSTED;}, get cfg(){return CFG;}, VW,
   regionXY(rid){ const [x,y]=toPx(REG[rid].lon,REG[rid].lat); const b=canvas.getBoundingClientRect(); return [b.left+x*b.width/canvas.width, b.top+y*b.height/canvas.height]; },
-  focus(rid,s){ const [x,y]=toPx(REG[rid].lon,REG[rid].lat); VW.s=VW.fit*(s||6); VW.x=wrap.clientWidth/2-x*VW.s; VW.y=wrap.clientHeight/2-y*VW.s; applyView(); }, cellOwnerAt(rid){ return S.owner[rid]; },
+  focus(rid,s){  const [x,y]=toPx(REG[rid].lon,REG[rid].lat); VW.s=VW.fit*(s||6); VW.x=wrap.clientWidth/2-x*VW.s; VW.y=wrap.clientHeight/2-y*VW.s; applyView(); }, cellOwnerAt(rid){ return S.owner[rid]; },
   regionPixels(rid){ const i=RIDS.indexOf(rid), out=[]; for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++) if(GRID[r*COLS+c]===i){ const d=ctx.getImageData(c*CS+1,r*CS+1,1,1).data; out.push([d[0],d[1],d[2]]); } return out; }, pixelAt(rid){ const [x,y]=toPx(REG[rid].lon,REG[rid].lat); const d=ctx.getImageData(Math.round(x)+6,Math.round(y)+6,1,1).data; return [d[0],d[1],d[2]]; }, RGB };
 (async function init(){ await detectProxy(); fitView(); showStart();
   if(HOSTED) setAIStatus('rules engine + order parser (optional on-device AI in Settings)');
