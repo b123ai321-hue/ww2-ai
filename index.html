@@ -2,7 +2,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0d0a07"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Ink &amp; Iron">
 <link rel="manifest" href="manifest.webmanifest"><link rel="apple-touch-icon" href="icon-180.png"><link rel="icon" href="icon.svg">
-<link rel="stylesheet" href="style.css?v=5"></head><body>
+<link rel="stylesheet" href="style.css?v=6"></head><body>
 <header><div class="logo">INK <span>&amp;</span> IRON</div>
 <div id="date">—</div><div class="pl"><span id="pflag" class="sw"></span><b id="pname">—</b><small id="pstats"></small></div>
 <div id="tension" title="World tension"><small>TENSION</small><span><i></i></span><b>0</b></div>
@@ -28,14 +28,12 @@
 <button id="start-continue">Continue autosave</button> <button id="start-settings">AI Settings</button></div></div>
 <div id="settings" class="modal"><div class="card"><h2>AI Game Master</h2>
 <p>The game always works with the built-in rules engine and order parser — free, offline, instant. You can optionally add an AI to interpret typed orders and speak for your ministers.</p>
-<h3>B2 world AI (webhook)</h3>
-<p><small>Optional. B2 resolves each move and replies through your private turns repo. Credentials are kept <b>only in this browser</b> (never in the game files). Priority: B2 → on-device AI → rules engine.</small></p>
+<h3>B2 world AI</h3>
+<p><small>Optional. Each move is posted as a comment in your private turns repo; B2 wakes, resolves it and writes the reply there. The token is kept <b>only in this browser</b> (never in the game files). Priority: B2 → on-device AI → rules engine.</small></p>
 <label><input type="checkbox" id="b2-enabled"> Use B2 as the world AI</label>
-<label>Webhook URL <input id="b2-hook" type="password" autocomplete="off" placeholder="paste (hidden)"></label>
-<label>Sender key <input id="b2-key" type="password" autocomplete="off" placeholder="paste (hidden)"></label>
 <label>Turns repo <input id="b2-repo" type="text" autocomplete="off" placeholder="owner/repo (private)"></label>
-<label>Read token (fine-grained, read-only) <input id="b2-token" type="password" autocomplete="off" placeholder="paste (hidden)"></label>
-<details><summary>Fallback: wake via PR comment (off by default)</summary><label><input type="checkbox" id="b2-pr"> Use PR-comment wake instead of the webhook</label><label>PR number <input id="b2-prnum" type="number" min="1"></label><label>PR-comment token <input id="b2-prtoken" type="password" autocomplete="off" placeholder="optional (hidden)"></label></details>
+<label>Token (fine-grained: Contents read + Pull requests write, this repo only) <input id="b2-token" type="password" autocomplete="off" placeholder="paste (hidden)"></label>
+<details><summary>Advanced (optional)</summary><label>Inbox PR number <input id="b2-prnum" type="number" min="1"></label><label><input type="checkbox" id="b2-wh"> Wake via webhook instead (browsers block it today)</label><label>Webhook URL <input id="b2-hook" type="password" autocomplete="off" placeholder="optional (hidden)"></label><label>Sender key <input id="b2-key" type="password" autocomplete="off" placeholder="optional (hidden)"></label></details>
 <div class="row"><button id="b2-save">Save B2</button><button id="b2-test">Test B2</button><button id="b2-forget" class="red">Forget B2 credentials</button></div><pre id="b2-state"></pre><pre id="b2-out"></pre>
 <h3>On-device AI (phone / browser)</h3>
 <p><small>Runs entirely in your browser with WebGPU. No account, no key, nothing sent to a server. One-time download, then cached. <span id="wl-gpu"></span></small></p>
@@ -50,4 +48,4 @@
 <label>Timeout (s) <input id="s-timeout" type="number" min="10" max="600"></label><label>Temperature <input id="s-temp" type="number" step="0.1" min="0" max="1.5"></label>
 <div class="row"><button id="s-detect">Autodetect</button><button id="s-test">Test model</button></div></div>
 <div class="row"><button id="s-close">Save &amp; close</button></div><pre id="s-detect-out"></pre></div></div>
-<script src="data.js?v=5"></script><script src="b2link.js?v=5"></script><script src="game.js?v=5"></script></body></html>
+<script src="data.js?v=6"></script><script src="b2link.js?v=6"></script><script src="game.js?v=6"></script></body></html>

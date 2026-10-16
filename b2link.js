@@ -5,7 +5,8 @@
 (function(root){
 'use strict';
 const V = 1, CFG_KEY = 'b2link.cfg';
-const DEF = { enabled:false, wake:'webhook', hookUrl:'', hookKey:'', repo:'', token:'', prToken:'', pr:1,
+// Default wake = PR comment: the webhook endpoint's CORS only allows Cursor's own origins, so browsers can't POST to it.
+const DEF = { enabled:false, wake:'ghcomment', hookUrl:'', hookKey:'', repo:'b123ai321-hue/ink-iron-turns', token:'', prToken:'', pr:1,
               timeoutMs:150000, pollMs:10000, firstPollMs:45000 };
 let store = (typeof localStorage!=='undefined') ? localStorage : null;
 let fetchFn = (typeof fetch!=='undefined') ? (...a)=>fetch(...a) : null;
@@ -58,10 +59,11 @@ async function wake(c, req){
     const r = await fetchFn(`https://api.github.com/repos/${c.repo}/issues/${c.pr}/comments`, {method:'POST',
       headers:{'Authorization':'Bearer '+(c.prToken||c.token),'Accept':'application/vnd.github+json','Content-Type':'application/json'},
       body: JSON.stringify({body:'b2turn '+body})});
-    if(!r.ok) throw new Error('wake HTTP '+r.status); return;
+    if(r.status!==201) throw new Error('comment API HTTP '+r.status); return r.status;
   }
-  const r = await fetchFn(c.hookUrl, {method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+c.hookKey}, body});
-  if(!r.ok) throw new Error('wake HTTP '+r.status);
+  let r; try{ r = await fetchFn(c.hookUrl, {method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+c.hookKey}, body}); }
+  catch(e){ throw new Error('webhook blocked by browser (CORS) — switch to PR-comment wake'); }
+  if(!r.ok) throw new Error('wake HTTP '+r.status); return r.status;
 }
 async function readResult(c, id){
   const r = await fetchFn(`https://api.github.com/repos/${c.repo}/contents/r/${encodeURIComponent(id)}.json`, {cache:'no-store',
@@ -86,7 +88,7 @@ async function resolve(W, act, worldOnly, opts={}){
     const early = await readResult(c, req.id).catch(()=>null);   // idempotent: already resolved (e.g. reload)
     if(early && early.id===req.id && shapeOk(early.r)) return finish(early.r);
     say('The world is thinking… (usually 1–2 min)'); await wake(c, req);
-  }catch(e){ say('B2 unreachable ('+e.message+') — rules engine used'); return null; }
+  }catch(e){ api.lastError=e.message; say('B2 unreachable ('+e.message+') — rules engine used'); return null; }
   await sleep(Math.min(c.firstPollMs, c.timeoutMs));
   while(now()-t0 < c.timeoutMs){
     try{ const j = await readResult(c, req.id);
@@ -95,11 +97,25 @@ async function resolve(W, act, worldOnly, opts={}){
     say(`The world is thinking… ${Math.round((now()-t0)/1000)}s`);
     await sleep(c.pollMs);
   }
-  say('B2 timed out — rules engine used'); return null;   // a late result for this id is simply ignored
+  api.lastError='timeout'; say('B2 timed out — rules engine used'); return null;   // a late result for this id is simply ignored
   function finish(r){ r=normalize(r); if(opts.validate){ try{ r=opts.validate(r); }catch(e){ say('B2 reply invalid — rules engine used'); return null; } } say('online · B2'); return r; }
 }
 
-const api = { V, cfg, saveCfg, forget, ready, gameId, newGame, digest, buildRequest, resolve,
+/* Settings "Test B2": one probe request. Routine answers probes with a tiny fixed reply,
+ * so this checks wake (comment API must return 201) AND the reply path. */
+async function probe(opts={}){
+  const c=cfg(), say=t=>{ try{ opts.onStatus&&opts.onStatus(t); }catch(e){} };
+  const id=`${gameId()}.probe${Math.random().toString(36).slice(2,6)}.p`, req={v:V,id,n:'TEST',d:'1935-12',mv:{k:'probe'},s:{}};
+  let st; try{ st=await wake(c, req); }catch(e){ return {ok:false, stage:'wake', msg:e.message}; }
+  say(`Wake sent (HTTP ${st}). Waiting for B2's reply… (usually 1–2 min)`);
+  const t0=now(); await sleep(Math.min(c.firstPollMs,c.timeoutMs));
+  while(now()-t0<c.timeoutMs){ try{ const j=await readResult(c,id); if(j&&j.id===id) return {ok:true, stage:'reply', msg:(j.r&&j.r.narrative)||'B2 online.'}; }
+    catch(e){ if(/40[13]/.test(e.message)) return {ok:false, stage:'read', msg:e.message}; }
+    say(`Wake sent (HTTP ${st}). Waiting for B2's reply… ${Math.round((now()-t0)/1000)}s`); await sleep(c.pollMs); }
+  return {ok:false, stage:'reply', msg:`wake accepted (HTTP ${st}) but no reply within ${Math.round(c.timeoutMs/1000)}s — is B2's routine on?`};
+}
+
+const api = { probe, lastError:null, V, cfg, saveCfg, forget, ready, gameId, newGame, digest, buildRequest, resolve,
   _inject(o){ if(o.store) store=o.store; if(o.fetch) fetchFn=o.fetch; if(o.now) now=o.now; if(o.sleep) sleep=o.sleep; } };
 if(typeof module!=='undefined' && module.exports) module.exports=api; else root.B2Link=api;
 })(typeof window!=='undefined'?window:globalThis);

@@ -721,19 +721,21 @@ $('#s-test').onclick=async()=>{ readSettings(); $('#s-detect-out').textContent='
 $('#wl-load').onclick=async()=>{ const id=$('#wl-model').value; if(!confirm(`Download the on-device AI model (${$('#wl-model').selectedOptions[0].dataset.size})? It is cached by your browser afterwards. Use Wi-Fi.`)) return; $('#wl-load').disabled=true;
   try{ const got=await loadWebLLM(id); $('#wl-out').textContent='Loaded '+got+'. Typed orders now go through the on-device AI (parser still checks).'; }catch(e){ $('#wl-out').textContent='Could not load on-device AI: '+e.message+' — the rules engine + parser keep working.'; WEBLLM=null; $('#wl-load').disabled=false; } };
 
-function fillB2(){ if(!window.B2Link) return; const c=B2Link.cfg(); $('#b2-enabled').checked=c.enabled; $('#b2-repo').value=c.repo||''; $('#b2-pr').checked=c.wake==='ghcomment'; $('#b2-prnum').value=c.pr||1;
-  ['b2-hook','b2-key','b2-token','b2-prtoken'].forEach(id=>{ $('#'+id).value=''; }); 
-  $('#b2-state').textContent=`Stored in this browser only: webhook ${c.hookUrl?'✔':'—'} · sender key ${c.hookKey?'✔':'—'} · read token ${c.token?'✔':'—'} · PR token ${c.prToken?'✔':'—'} · ${B2Link.ready()?'READY (B2 is the AI)':'not active'}`; }
-function saveB2(){ if(!window.B2Link) return; const c=B2Link.cfg(), patch={enabled:$('#b2-enabled').checked, repo:$('#b2-repo').value.trim()||c.repo, wake:$('#b2-pr').checked?'ghcomment':'webhook', pr:+$('#b2-prnum').value||1};
-  [['b2-hook','hookUrl'],['b2-key','hookKey'],['b2-token','token'],['b2-prtoken','prToken']].forEach(([id,k])=>{ const v=$('#'+id).value.trim(); if(v) patch[k]=v; }); B2Link.saveCfg(patch); fillB2(); }
+function fillB2(){ if(!window.B2Link) return; const c=B2Link.cfg(); $('#b2-enabled').checked=c.enabled; $('#b2-repo').value=c.repo||''; $('#b2-wh').checked=c.wake==='webhook'; $('#b2-prnum').value=c.pr||1;
+  ['b2-hook','b2-key','b2-token'].forEach(id=>{ $('#'+id).value=''; });
+  $('#b2-state').textContent=`Stored in this browser only: token ${c.token?'✔':'—'} · wake: ${c.wake==='webhook'?'webhook':'PR #'+(c.pr||1)+' comment'}${c.wake==='webhook'?` · webhook ${c.hookUrl?'✔':'—'} · key ${c.hookKey?'✔':'—'}`:''} · ${B2Link.ready()?'READY (B2 is the AI)':'not active'}`; }
+function saveB2(){ if(!window.B2Link) return; const c=B2Link.cfg(), patch={enabled:$('#b2-enabled').checked, repo:$('#b2-repo').value.trim()||c.repo, wake:$('#b2-wh').checked?'webhook':'ghcomment', pr:+$('#b2-prnum').value||1};
+  [['b2-hook','hookUrl'],['b2-key','hookKey'],['b2-token','token']].forEach(([id,k])=>{ const v=$('#'+id).value.trim(); if(v) patch[k]=v; }); B2Link.saveCfg(patch); fillB2(); }
 $('#b2-save').onclick=()=>{ saveB2(); };
 $('#b2-forget').onclick=()=>{ if(window.B2Link){ B2Link.forget(); fillB2(); $('#b2-out').textContent='B2 credentials removed from this browser.'; } };
-$('#b2-test').onclick=async()=>{ saveB2(); const c=B2Link.cfg(); const out=$('#b2-out'); if(!c.repo||!c.token){ out.textContent='Need the turns repo and a read token.'; return; } out.textContent='Checking GitHub read access…';
-  try{ const r=await fetch(`https://api.github.com/repos/${c.repo}`,{headers:{'Authorization':'Bearer '+c.token,'Accept':'application/vnd.github+json'}}); out.textContent=r.ok?`Read token OK: ${c.repo} is reachable (${(await r.json()).private?'private':'PUBLIC — should be private!'}).`:`GitHub said HTTP ${r.status} — check the token/repo.`;
-    if(r.ok&&c.wake==='webhook'){ if(!c.hookUrl||!c.hookKey){ out.textContent+=' Webhook URL/key missing.'; return; }
-      out.textContent+=' Sending a test turn to B2 (the world is thinking…)'; const gid=localStorage.getItem('b2link.gid'); localStorage.setItem('b2link.gid','test'+Math.random().toString(36).slice(2,8)); let res; try{ res=await B2Link.resolve(b2World(),{kind:'talk',target:neighbours(P())[0]||'UK',text:'Test turn from settings'},false,{onStatus:t=>out.textContent=t,validate:o=>validateResult(o,{})}); } finally { if(gid) localStorage.setItem('b2link.gid',gid); else localStorage.removeItem('b2link.gid'); }
-      out.textContent=res?`B2 answered: "${res.narrative.slice(0,160)}"`:'B2 did not answer in time — the rules engine will be used for turns until it does.'; } }
-  catch(e){ out.textContent='Test failed: '+e.message+' (network or CORS). The rules engine will be used.'; } };
+$('#b2-test').onclick=async()=>{ saveB2(); const c=B2Link.cfg(); const out=$('#b2-out'); if(!c.repo||!c.token){ out.textContent='Need the turns repo and the token.'; return; } out.textContent='Checking GitHub access…';
+  try{ const r=await fetch(`https://api.github.com/repos/${c.repo}`,{headers:{'Authorization':'Bearer '+c.token,'Accept':'application/vnd.github+json'}});
+    if(!r.ok){ out.textContent=`GitHub said HTTP ${r.status} — check the token/repo.`; return; }
+    const pv=(await r.json()).private; out.textContent=`Token OK: ${c.repo} is reachable (${pv?'private':'PUBLIC — should be private!'}). Sending a probe to B2…`;
+    if(c.wake==='webhook'&&(!c.hookUrl||!c.hookKey)){ out.textContent+=' Webhook URL/key missing.'; return; }
+    const head=out.textContent; const res=await B2Link.probe({onStatus:t=>out.textContent=head+'\n'+t});
+    out.textContent=head+'\n'+(res.ok?`B2 answered: "${String(res.msg).slice(0,160)}"`:res.stage==='wake'?`Could not wake B2: ${res.msg}.`+(/403|404/.test(res.msg)?' The token needs "Pull requests: write" on this repo.':''):`B2 problem: ${res.msg}`); }
+  catch(e){ out.textContent='Test failed: '+e.message+' (network). The rules engine will be used.'; } };
 $('#btn-settings').addEventListener('click',fillB2);
 
 /* ================= START ================= */
